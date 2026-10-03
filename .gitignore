@@ -1,5 +1,6 @@
 # Local Python tooling and downloaded ASR weights
 worker/.venv/
+worker/.venv-tts/
 worker/.python/
 worker/.uv-cache/
 worker/.model-cache/

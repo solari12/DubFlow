@@ -1,0 +1,84 @@
+# Phase 1D: Text-to-Speech Layer
+
+## Scope and design
+
+Phase 1D consumes Phase 1C translated speaker-aware JSON. It produces one WAV per non-empty `target_text`. Each output segment copies the input `id`, `start`, `end`, and `speaker`; it does not rewrite the translation or align generated speech to the original timecodes. A failed or empty translation is recorded as a failed TTS segment without calling the engine.
+
+The pipeline depends on the provider-neutral `TTSEngine` interface. Its `synthesize(text, language, output_path, speaker)` method returns a `TTSResult` with the generated path, audio duration, sample rate, engine, language, speaker, and measured runtime. Duration and sample rate are read back from the written WAV. The current backend is `SherpaOnnxPiperEngine`; future engines can implement the same interface.
+
+## Engine selection
+
+The initial engine is Sherpa-ONNX 1.13.8 running the Piper VITS `vi_VN-vivos-x_low` voice. It is a compact local Vietnamese model (27,737,893 byte ONNX file, about 26.5 MiB), uses 16 kHz audio, runs on CPU, and needs no network access after its model archive has been downloaded. Sherpa-ONNX is Apache 2.0 licensed. The VIVOS voice model card states it was trained from scratch on the VIVOS dataset and lists the dataset license as CC BY-NC-SA 4.0. The Piper voices repository has a repository-level MIT marker; because the individual model card points to more restrictive source-data terms, treat this voice as noncommercial and share-alike, preserve attribution, and review the model card before redistribution. References: [Sherpa-ONNX voice instructions](https://k2-fsa.github.io/sherpa/onnx/tts/all/Vietnamese/vits-piper-vi_VN-vivos-x_low.html), [VIVOS Piper voice model card](https://huggingface.co/rhasspy/piper-voices/blob/main/vi/vi_VN/vivos/x_low/MODEL_CARD), [Sherpa-ONNX license](https://github.com/k2-fsa/sherpa-onnx/blob/master/LICENSE).
+
+The Sherpa model archive extracted to about 45.7 MB, including the 27.7 MB ONNX voice, its small config/token files, and shared eSpeak NG phonemizer data. The measured benchmark process peak working set was about 256 MiB. The engine explicitly selects Sherpa's CPU provider; it uses 0 MiB of VRAM. These are measurements from this process and this short run, not minimum system requirements.
+
+Alternatives considered:
+
+- The Piper VIVOS `x_low` model was selected for small size, local CPU operation, and a from-scratch Vietnamese voice with documented source-data terms. Its quality is explicitly very low, and its noncommercial/share-alike source terms limit later product use.
+- Piper `vais1000-medium` is about 63 MB and targets Vietnamese, but its model card says it was fine-tuned from the English Lessac voice; that voice's source license has unresolved downstream interpretation. It was not selected for this checkpoint.
+- Cloud voices such as Edge TTS avoid local model storage and have Vietnamese voices, but require an online service at synthesis time and are not a local/offline engine.
+- XTTS-style multilingual voice-cloning systems use substantially larger models and add cloning behavior outside this phase's scope. No cloning or reference-audio path is included.
+
+## Windows DLL handling and isolation
+
+The first inference attempt failed because `C:\Windows\System32\onnxruntime.dll` is version 1.17.1, while Sherpa-ONNX 1.13.8 needs a newer ONNX Runtime API. DubFlow adds the TTS virtual environment's `onnxruntime/capi` and `sherpa_onnx/lib` directories to this process's DLL search path before loading Sherpa. This follows the [documented Sherpa-ONNX Windows DLL collision](https://github.com/k2-fsa/sherpa-onnx/issues/3059) workaround and does not replace or edit the system DLL.
+
+TTS is isolated in ignored `worker/.venv-tts/`. Do not install the TTS extra into the ASR or diarization environments. ASR, diarization, and translation remain separate sequential commands; this TTS adapter itself uses CPU and does not load a CUDA model.
+
+## Install and run
+
+From the repository root, set up the isolated runtime and download the model package once:
+
+```powershell
+$env:UV_PROJECT_ENVIRONMENT = Join-Path (Get-Location) 'worker/.venv-tts'
+uv sync --project worker --extra tts --no-install-project
+
+$ttsCache = Join-Path (Get-Location) 'worker/.model-cache/tts'
+$ttsArchive = Join-Path $ttsCache 'vits-piper-vi_VN-vivos-x_low.tar.bz2'
+New-Item -ItemType Directory -Force -Path $ttsCache | Out-Null
+Invoke-WebRequest `
+  'https://github.com/k2-fsa/sherpa-onnx/releases/download/tts-models/vits-piper-vi_VN-vivos-x_low.tar.bz2' `
+  -OutFile $ttsArchive
+tar -xjf $ttsArchive -C $ttsCache
+```
+
+Then benchmark the Phase 1C output:
+
+```powershell
+worker/.venv-tts/Scripts/python.exe worker/scripts/benchmark_tts.py `
+  output/phase1c/translation-benchmark.json `
+  --language vi --output output/phase1d/benchmark
+```
+
+The command writes `tts-benchmark.json` and per-segment WAVs under the output directory. WAV format is mono PCM generated by Sherpa-ONNX at the model's 16 kHz sample rate.
+
+## Real TTS smoke and transcript benchmark
+
+A separate real engine smoke run used the Vietnamese sentence “Xin chào, đây là bản thử nghiệm của DubFlow.” It created and reopened a valid mono WAV with 16 kHz sample rate and 3.36 seconds of audio. Initialization took 1.110199 seconds; synthesis took 0.133508 seconds; RTF was 0.039735. The artifact is `output/phase1d/smoke-run/audio/segment-0000.wav`.
+
+The actual Phase 1C transcript benchmark produced 4 WAVs from 4 segments with no synthesis failures. The report is `output/phase1d/benchmark/tts-benchmark.json` (generated outputs are ignored by Git).
+
+| Metric | Result |
+| --- | ---: |
+| Engine / model | Sherpa-ONNX / Piper VIVOS x-low |
+| Language / device | Vietnamese (`vi`) / CPU |
+| ONNX model size | 27,737,893 bytes |
+| Model initialization | 1.308055 s |
+| Segments / successful / failed | 4 / 4 / 0 |
+| Generated audio duration | 24.70125 s |
+| Synthesis runtime | 0.911875 s |
+| RTF | 0.036916 |
+| Sample rate | 16,000 Hz |
+| Peak process working set / VRAM | 255.72 MiB / 0 MiB |
+
+The benchmark includes a punctuation-only ASR segment, which generated a very short WAV. The original transcript timings are metadata only; audio duration can differ from each original interval. Runtime and RTF cover generation and WAV writing, and exclude model initialization. Total runtime includes model initialization.
+
+## Limitations and future speaker handling
+
+The VIVOS checkpoint is quality `x_low`. Sherpa also emitted “Skip unknown phonemes” warnings for Vietnamese tone symbols during both real runs. The WAVs are valid and synthesis completed, but the smoke check validates file integrity, not naturalness, pronunciation accuracy, or production suitability. This is the primary quality limitation; a better licensed Vietnamese model and its phonemizer should be evaluated before any product-quality claim.
+
+The model has 65 dataset speakers, but this adapter deliberately uses the fixed speaker ID 0 for every segment. It carries the transcript speaker label into the result without faking voice differences. A future phase can add explicit speaker-to-voice-profile mappings using voices with clear consent and redistribution rights; voice cloning and training are not part of Phase 1D.
+
+## Regression verification
+
+Both worker test environments passed after the TTS changes: the ASR environment reported **47 passed, 1 skipped** (the existing Torch-only audio test), and the diarization/translation environment reported **48 passed**. The real Phase 1B.2 ASR + diarization + merge benchmark also passed: 2 speakers, 4 transcript segments, 3 assigned and 1 unassigned, 3925 MiB sampled whole-GPU memory, no OOM. The real Phase 1C translation benchmark passed with 4 translated segments and 0 failures. Existing environments and model configurations were not modified by TTS setup.

@@ -1,6 +1,6 @@
 # DubFlow Python Worker
 
-Phase 1A is a local prototype for media-to-transcript processing. It extracts a mono 16 kHz WAV with FFmpeg, transcribes it through a replaceable ASR interface, and writes stable JSON. It does not include an API server, queue, database, translation, or TTS.
+Phase 1A is a local prototype for media-to-transcript processing. It extracts a mono 16 kHz WAV with FFmpeg, transcribes it through a replaceable ASR interface, and writes stable JSON. It does not include an API server, queue, database, or TTS.
 
 ## Requirements
 
@@ -131,6 +131,33 @@ worker/.venv-diarization/Scripts/python.exe worker/scripts/benchmark_translation
 ```
 
 See [Phase 1C](../docs/phase-1c.md) for engine details, the recorded run, and its language and quality limitations.
+
+## TTS benchmark
+
+Phase 1D uses a provider-neutral `TTSEngine` interface with a CPU-only Sherpa-ONNX adapter for Piper's Vietnamese VIVOS voice. Keep TTS in its own environment so its ONNX Runtime and Sherpa DLLs cannot affect the ASR or diarization runtimes. From the repository root:
+
+```powershell
+$env:UV_PROJECT_ENVIRONMENT = Join-Path (Get-Location) 'worker/.venv-tts'
+uv sync --project worker --extra tts --no-install-project
+
+$ttsCache = Join-Path (Get-Location) 'worker/.model-cache/tts'
+$ttsArchive = Join-Path $ttsCache 'vits-piper-vi_VN-vivos-x_low.tar.bz2'
+New-Item -ItemType Directory -Force -Path $ttsCache | Out-Null
+Invoke-WebRequest `
+  'https://github.com/k2-fsa/sherpa-onnx/releases/download/tts-models/vits-piper-vi_VN-vivos-x_low.tar.bz2' `
+  -OutFile $ttsArchive
+tar -xjf $ttsArchive -C $ttsCache
+```
+
+After downloading the model once, synthesis runs offline and always uses CPU. A translated transcript segment becomes a separate WAV under the output directory; its ID, timestamps, and speaker label are copied into the report. The current voice has one fixed speaker ID, so labels are preserved as metadata and do not alter the generated voice:
+
+```powershell
+worker/.venv-tts/Scripts/python.exe worker/scripts/benchmark_tts.py `
+  output/phase1c/translation-benchmark.json `
+  --language vi --output output/phase1d/benchmark
+```
+
+The report is `output/phase1d/benchmark/tts-benchmark.json`. See [Phase 1D](../docs/phase-1d.md) for the selected voice's limitations, license notes, smoke check, and measured results.
 
 ## CUDA verification record
 
