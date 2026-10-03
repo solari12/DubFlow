@@ -1,0 +1,44 @@
+[build-system]
+requires = ["hatchling>=1.26"]
+build-backend = "hatchling.build"
+
+[project]
+name = "dubflow-worker"
+version = "0.1.0"
+description = "Local AI/media worker prototype for DubFlow transcription"
+requires-python = ">=3.11,<3.12"
+dependencies = [
+    "faster-whisper>=1.0,<2.0",
+    "imageio-ffmpeg>=0.6,<1.0",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8,<9"]
+cuda = ["nvidia-cublas-cu12==12.6.4.1"]
+diarization = [
+    "pyannote.audio==4.0.7",
+    "torch==2.11.0",
+    "torchaudio==2.11.0",
+    "torchcodec==0.15.0",
+]
+
+[[tool.uv.index]]
+name = "pytorch-cu130"
+url = "https://download.pytorch.org/whl/cu130"
+explicit = true
+
+[tool.uv.sources]
+torch = { index = "pytorch-cu130" }
+torchaudio = { index = "pytorch-cu130" }
+torchcodec = { index = "pytorch-cu130" }
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/dubflow_worker"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"

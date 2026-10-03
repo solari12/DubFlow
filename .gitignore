@@ -1,0 +1,15 @@
+# Local Python tooling and downloaded ASR weights
+worker/.venv/
+worker/.python/
+worker/.uv-cache/
+worker/.model-cache/
+worker/.pytest_cache/
+worker/.ruff_cache/
+worker/**/__pycache__/
+worker/*.egg-info/
+
+# User media and generated results; keep the placeholder files tracked
+input/*
+!input/.gitkeep
+output/*
+!output/.gitkeep

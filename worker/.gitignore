@@ -1,0 +1,10 @@
+.venv/
+.venv-diarization/
+.python/
+.uv-cache/
+.model-cache/
+__pycache__/
+.pytest_cache/
+.ruff_cache/
+*.py[cod]
+*.egg-info/
