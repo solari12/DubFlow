@@ -17,14 +17,15 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("transcript", type=Path, help="Phase 1C or Phase 1D transcript JSON")
     parser.add_argument("tts_output_dir", type=Path, help="Directory containing Phase 1D WAVs")
     parser.add_argument("--output", type=Path, required=True, help="Phase 1E output directory")
-    parser.add_argument("--min-stretch", type=float, default=0.90)
+    parser.add_argument("--min-stretch", type=float, default=0.85)
     parser.add_argument("--max-stretch", type=float, default=1.10)
-    parser.add_argument("--overflow-policy", choices=("preserve", "trim", "fail"), default="preserve")
+    parser.add_argument("--overflow-policy", choices=("preserve", "trim", "fail"), default="trim")
     parser.add_argument("--no-pad-short", action="store_true", help="Leave short audio unpadded")
     parser.add_argument("--sample-rate", type=int, default=16000)
     parser.add_argument("--channels", type=int, choices=(1, 2), default=1)
     parser.add_argument("--format", choices=("wav",), default="wav")
     parser.add_argument("--ffmpeg", default="ffmpeg")
+    parser.add_argument("--source-media", type=Path, help="optional original media for pause detection")
     return parser
 
 
@@ -46,6 +47,7 @@ def run(transcript_path: Path, tts_output_dir: Path, output_dir: Path, args: arg
         output_dir=output_dir,
         settings=settings,
         transcript_path=transcript_path.resolve(),
+        source_media=args.source_media,
     )
     input_info = {
         "path": str(transcript_path),

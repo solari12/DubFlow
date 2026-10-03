@@ -132,6 +132,22 @@ worker/.venv-diarization/Scripts/python.exe worker/scripts/benchmark_translation
 
 See [Phase 1C](../docs/phase-1c.md) for engine details, the recorded run, and its language and quality limitations.
 
+## Context-aware translation quality experiment
+
+Phase 1I reruns ASR and diarization for a real source, merges speaker labels, groups only clear adjacent continuations, and translates each unit once. Language-script routing handles obvious English spans in a globally Japanese-detected transcript. Original segment IDs, timestamps, and speaker labels remain mapped into `translated.json`. The configured term list is in `worker/config/translation-glossary.json`; protected terms are masked across providers. NLLB output then passes through a separate deterministic Vietnamese naturalizer. Incomplete units without safe same-speaker, same-language context keep their literal output for review and have no final rewrite.
+
+Run from the repository root; ASR and diarization run in their existing environments, followed by CPU NLLB in the diarization environment:
+
+```powershell
+worker/.venv-diarization/Scripts/python.exe worker/scripts/validate_translation_quality.py `
+  input/real_test/sample.mp4 `
+  --output-dir output/real-validation-v5 `
+  --diarization-device cpu --provider nllb `
+  --model facebook/nllb-200-distilled-600M --device cpu --offline-models
+```
+
+The command writes `transcript.json`, `translated.json`, `translation-comparison.json`, and `validation-report.json`. It does not run TTS or render video. `--reuse-upstream --offline-models` can reuse saved ASR/diarization outputs and force cached model use after those upstream stages have already passed. The report requires subjective human review and does not turn successful inference into a translation-quality claim. Each segment row repeats its complete context-unit translation for review convenience; `translation_units` is canonical, and segment-row `target_text` must not be concatenated or sent directly to TTS. See [Phase 1I](../docs/phase-1i.md) for the real benchmark and unresolved limitations.
+
 ## TTS benchmark
 
 Phase 1D uses a provider-neutral `TTSEngine` interface with a CPU-only Sherpa-ONNX adapter for Piper's Vietnamese VIVOS voice. Keep TTS in its own environment so its ONNX Runtime and Sherpa DLLs cannot affect the ASR or diarization runtimes. From the repository root:
@@ -169,7 +185,7 @@ worker/.venv/Scripts/python.exe worker/scripts/align_audio.py `
   output/phase1d/benchmark/audio `
   --output output/phase1e `
   --min-stretch 0.90 --max-stretch 1.10 `
-  --overflow-policy preserve --sample-rate 16000 --channels 1
+  --overflow-policy trim --sample-rate 16000 --channels 1
 ```
 
 Benchmark the same run with:
@@ -181,7 +197,43 @@ worker/.venv/Scripts/python.exe worker/scripts/benchmark_alignment.py `
   --output output/phase1e
 ```
 
-The default behavior pads short clips with silence, uses bounded pitch-preserving FFmpeg time-stretch for slight overruns, and preserves longer overruns while marking them `overflow`. The timeline sums overlapping clips and applies global peak limiting only if their sum would exceed 0.99 full scale. See [Phase 1E](../docs/phase-1e.md) for the algorithm, policies, and measured run.
+The default `trim` behavior plans clips in source order, pads short clips, applies bounded FFmpeg time-stretch for slight overruns, and explicitly truncates remaining overflows at each segment's source window. The opt-in `preserve` policy remains available for legacy use and shifts later dialogue after preserved overflow. The report records shortening attempts, remaining rephrase needs, truncation, preserved pauses, and actual overlap counts. Ordinary dialogue clips cannot overlap in the final timeline. The existing global peak protection remains in place. See [Phase 1H](../docs/phase-1h.md) for the implementation and full real-source validation.
+
+Pass `--source-media` to `benchmark_alignment.py` or `align_audio.py` to decode the original media and retain measurable silence around transcript boundaries. The deterministic `shorten_for_duration` translation hook returns unchanged text when the provider has no shortening method. Remaining long clips are explicitly truncated at their planned ends and marked for concise rephrasing; they are never mixed over later dialogue.
+
+## Video rendering
+
+Phase 1F replaces the original video's audio with the Phase 1E WAV, copies the source video stream by default, and encodes the dubbed audio as AAC. Longer dubbed audio is trimmed to the video duration; shorter audio is padded with silence to the video end. The full Phase 1E WAV is preserved.
+
+```powershell
+worker/.venv/Scripts/python.exe worker/scripts/render_video.py `
+  input/sample.mp4 `
+  output/phase1e/dubbed_timeline.wav `
+  --output output/phase1f/dubbed_video.mp4 `
+  --audio-codec aac --audio-bitrate 192k --video-mode copy
+
+worker/.venv/Scripts/python.exe worker/scripts/benchmark_render.py `
+  input/sample.mp4 `
+  output/phase1e/dubbed_timeline.wav `
+  --output-dir output/phase1f
+```
+
+Use `--video-mode h264` to explicitly re-encode when the source cannot be copied into MP4. See [Phase 1F](../docs/phase-1f.md) for result fields, duration policies, validation, and benchmark details.
+
+## Dubbing quality safeguards
+
+Translation now uses the ASR-detected language by default. Pass `--source-language` only as an explicit override. Unsupported provider pairs stop with an error instead of silently using English. The quality TTS benchmark provides a bounded rephrase hook and conservative duration settings:
+
+```powershell
+worker/.venv-tts/Scripts/python.exe worker/scripts/benchmark_quality_tts.py `
+  output/translated.json `
+  --output output/quality-tts `
+  --min-time-stretch-ratio 0.85 --max-time-stretch-ratio 1.10 `
+  --max-translation-expansion-ratio 1.25 --max-overflow-ratio 1.50 `
+  --max-retries 1
+```
+
+Argos currently does not implement concise rephrasing, and installed translation routes are environment-specific. NLLB-200 is available as a separate lazy provider for `ja -> vi`; install the `nllb` extra in an environment that already has its desired PyTorch build. The default device is CPU. Weights are fetched by Hugging Face on first load and are not stored in the repository. Select it explicitly with `benchmark_translation.py ... --provider nllb --device cpu`; provider failures do not fall back to Argos. See [Phase 1G.1](../docs/phase-1g1.md) for the benchmark and full pipeline run.
 
 ## CUDA verification record
 

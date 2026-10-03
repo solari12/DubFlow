@@ -22,6 +22,7 @@ diarization = [
     "torchcodec==0.15.0",
 ]
 translation = ["argostranslate==1.11.0"]
+nllb = ["transformers>=4.45,<5", "sentencepiece>=0.2,<1", "torch>=2.0"]
 tts = ["sherpa-onnx==1.13.8"]
 
 [[tool.uv.index]]

@@ -17,6 +17,12 @@ from dubflow_worker.audio.alignment import (
     read_pcm_wav,
     write_pcm_wav,
 )
+from dubflow_worker.audio.extractor import AudioExtractor
+from dubflow_worker.audio.timeline import (
+    TimelineSegmentPlan,
+    detect_boundary_pauses,
+    plan_dialogue_timeline,
+)
 from dubflow_worker.models.alignment import (
     AlignedSegment,
     AlignmentRun,
@@ -108,22 +114,19 @@ def _failed_segment(segment: Mapping[str, Any], exc: Exception) -> AlignedSegmen
 
 def _align_segment(
     segment: Mapping[str, Any],
+    plan: TimelineSegmentPlan,
     *,
-    tts_output_dir: Path,
-    transcript_path: Path | None,
     output_dir: Path,
     settings: AudioAlignmentSettings,
     temporary_dir: Path,
 ) -> AlignedSegment:
-    segment_id = int(segment.get("id", segment.get("segment_id", -1)))
-    start = float(segment.get("start", segment.get("target_start", 0.0)))
-    end = float(segment.get("end", segment.get("target_end", start)))
-    if segment_id < 0:
-        raise ValueError("Segment id must be non-negative")
-    if not valid_timestamps(start, end):
-        raise ValueError("Segment timestamps must satisfy finite 0 <= start < end")
-    target_duration = round(end - start, 9)
-    source_path = _find_audio_path(segment, tts_output_dir, transcript_path)
+    segment_id = plan.segment_id
+    source_start = plan.source_start
+    source_end = plan.source_end
+    start = plan.planned_start
+    target_duration = plan.allowed_duration
+    end = plan.planned_end
+    source_path = plan.tts_audio_path
     if not source_path.is_file():
         raise FileNotFoundError(f"TTS WAV is missing: {source_path}")
 
@@ -139,6 +142,14 @@ def _align_segment(
     temporary_wav = temporary_dir / f"{segment_id}-normalized.wav"
     output_path = output_dir / "aligned_audio" / f"segment-{segment_id:04d}.wav"
     output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    shortening_attempted = bool(segment.get("shortening_attempted"))
+    shortened = bool(segment.get("shortened"))
+    overflow_before = original_duration > target_duration + 0.5 / settings.sample_rate
+    requires_rephrase = overflow_before and factor < settings.min_stretch_factor
+    forcibly_truncated = False
+    truncated_duration = 0.0
+    overflow_after = False
 
     if math.isclose(original_duration, target_duration, rel_tol=0.0, abs_tol=0.5 / settings.sample_rate):
         normalized_path = _convert_source(
@@ -185,43 +196,64 @@ def _align_segment(
         status = "success"
         stretch_factor = factor
         error = None
+    elif settings.overflow_policy == "fail":
+        return AlignedSegment(
+            segment_id=segment_id,
+            speaker=segment.get("speaker"),
+            target_start=start,
+            target_end=end,
+            target_duration=target_duration,
+            original_tts_duration=original_duration,
+            final_audio_duration=None,
+            duration_error=None,
+            stretch_factor=factor,
+            alignment_action="overflow_fail",
+            output_audio_path=None,
+            status="overflow",
+            error=(
+                f"Required stretch ratio {factor:.6f} is below the safe minimum "
+                f"{settings.min_stretch_factor:.3f}"
+            ),
+            source_start=source_start,
+            source_end=source_end,
+            planned_start=start,
+            planned_end=end,
+            allowed_duration=target_duration,
+            overflow_before_fitting=overflow_before,
+            overflow_after_fitting=True,
+            requires_concise_rephrasing=True,
+            shortening_attempted=shortening_attempted,
+            shortened=shortened,
+            preserved_pause_before=plan.preserved_pause_before,
+            preserved_pause_after=plan.preserved_pause_after,
+        )
     else:
         normalized_path = _convert_source(
             source_path,
             temporary_wav,
             source_metadata=metadata,
             settings=settings,
+            atempo=1.0 / settings.min_stretch_factor
+            if settings.overflow_policy == "trim"
+            else None,
         )
         audio = read_pcm_wav(normalized_path)
         if settings.overflow_policy == "preserve":
             samples = array.array("h", audio.samples)
             action = "overflow_preserve"
             error = None
-        elif settings.overflow_policy == "trim":
-            samples = fit_samples_to_frames(audio.samples, target_frames, settings.channels)
-            action = "overflow_trim"
-            error = "Audio was truncated by the configured overflow policy"
         else:
-            return AlignedSegment(
-                segment_id=segment_id,
-                speaker=segment.get("speaker"),
-                target_start=start,
-                target_end=end,
-                target_duration=target_duration,
-                original_tts_duration=original_duration,
-                final_audio_duration=None,
-                duration_error=None,
-                stretch_factor=factor,
-                alignment_action="overflow_fail",
-                output_audio_path=None,
-                status="overflow",
-                error=(
-                    f"Required stretch factor {factor:.6f} is outside configured bounds "
-                    f"[{settings.min_stretch_factor:.3f}, {settings.max_stretch_factor:.3f}]"
-                ),
+            samples = fit_samples_to_frames(audio.samples, target_frames, settings.channels)
+            forcibly_truncated = len(audio.samples) > target_frames * settings.channels
+            truncated_duration = round(max(0.0, audio.duration - target_duration), 6)
+            overflow_after = forcibly_truncated
+            action = "overflow_truncate_after_bounded_stretch"
+            error = (
+                "TTS remained longer than its source window after bounded time-stretch; "
+                f"the final {truncated_duration:.3f} seconds were explicitly truncated"
             )
         status = "overflow"
-        stretch_factor = 1.0
+        stretch_factor = settings.min_stretch_factor if settings.overflow_policy == "trim" else 1.0
 
     write_pcm_wav(output_path, samples, settings.sample_rate, settings.channels)
     final_audio = read_pcm_wav(output_path)
@@ -240,6 +272,20 @@ def _align_segment(
         output_audio_path=output_path,
         status=status,
         error=error,
+        source_start=source_start,
+        source_end=source_end,
+        planned_start=start,
+        planned_end=end,
+        allowed_duration=target_duration,
+        overflow_before_fitting=overflow_before,
+        overflow_after_fitting=overflow_after,
+        requires_concise_rephrasing=requires_rephrase,
+        shortening_attempted=shortening_attempted,
+        shortened=shortened,
+        forcibly_truncated=forcibly_truncated,
+        truncated_duration=truncated_duration,
+        preserved_pause_before=plan.preserved_pause_before,
+        preserved_pause_after=plan.preserved_pause_after,
     )
 
 
@@ -290,6 +336,7 @@ def align_translated_transcript(
     output_dir: Path,
     settings: AudioAlignmentSettings | None = None,
     transcript_path: Path | None = None,
+    source_media: Path | None = None,
 ) -> AlignmentRun:
     settings = settings or AudioAlignmentSettings()
     tts_output_dir = Path(tts_output_dir)
@@ -308,21 +355,70 @@ def align_translated_transcript(
 
     started = time.perf_counter()
     segments: list[AlignedSegment] = []
+    source_pauses: dict[int, float] = {}
+    if source_media is not None:
+        with AudioExtractor(settings.ffmpeg_path).extract(Path(source_media)) as extracted:
+            source_pauses = detect_boundary_pauses(extracted.path, input_segments)
+    planning_inputs: list[dict[str, Any]] = []
+    planning_failures: dict[int, Exception] = {}
+    for item in input_segments:
+        segment_id = int(item.get("id", item.get("segment_id", -1)))
+        try:
+            source_path = _find_audio_path(item, tts_output_dir, transcript_path)
+            metadata = _audio_metadata(source_path)
+            frames, rate, channels, width, compression = metadata
+            if frames < 1:
+                raise InvalidAudioError("TTS WAV has zero duration")
+            if rate < 1 or channels < 1 or width != 2 or compression != "NONE":
+                raise InvalidAudioError("TTS WAV must contain non-empty 16-bit PCM samples")
+            planning_inputs.append(
+                {
+                    "segment_id": segment_id,
+                    "speaker_id": item.get("speaker"),
+                    "source_start": float(item.get("start", item.get("target_start", 0.0))),
+                    "source_end": float(item.get("end", item.get("target_end", 0.0))),
+                    "translated_text": str(item.get("target_text", "")),
+                    "generated_tts_duration": frames / rate,
+                    "tts_audio_path": source_path,
+                    "source_pause_before": source_pauses.get(segment_id, 0.0),
+                }
+            )
+        except Exception as exc:
+            planning_failures[segment_id] = exc
+    plans = plan_dialogue_timeline(
+        planning_inputs,
+        min_stretch_ratio=settings.min_stretch_factor,
+        sample_rate=settings.sample_rate,
+        preserve_overflow=settings.overflow_policy == "preserve",
+    )
+    plan_by_id = {plan.segment_id: plan for plan in plans}
     with TemporaryDirectory(prefix="dubflow-align-") as temporary_name:
         temporary_dir = Path(temporary_name)
         for item in input_segments:
+            segment_id = int(item.get("id", item.get("segment_id", -1)))
             try:
-                aligned = _align_segment(
-                    item,
-                    tts_output_dir=tts_output_dir,
-                    transcript_path=transcript_path,
-                    output_dir=output_dir,
-                    settings=settings,
-                    temporary_dir=temporary_dir,
-                )
+                if segment_id in planning_failures:
+                    raise planning_failures[segment_id]
+                aligned = _align_segment(item, plan_by_id[segment_id],
+                                         output_dir=output_dir, settings=settings,
+                                         temporary_dir=temporary_dir)
             except Exception as exc:
                 aligned = _failed_segment(item, exc)
             segments.append(aligned)
+        ordered_successful = sorted(
+            (item for item in segments if item.output_audio_path is not None),
+            key=lambda item: (item.planned_start or item.target_start, item.segment_id),
+        )
+        actual_overlap_count = 0
+        last_end = -math.inf
+        for item in ordered_successful:
+            item_start = item.planned_start if item.planned_start is not None else item.target_start
+            item_end = item_start + (item.final_audio_duration or 0.0)
+            if item_start < last_end - 0.5 / settings.sample_rate:
+                actual_overlap_count += 1
+            last_end = max(last_end, item_end)
+        if actual_overlap_count:
+            raise RuntimeError("Timeline planner produced overlapping ordinary dialogue audio")
         total_duration, peak_amplitude, clipping_count = _mix_timeline(
             segments,
             target_duration=target_timeline_duration,
@@ -331,6 +427,12 @@ def align_translated_transcript(
         )
     runtime = time.perf_counter() - started
     rtf = runtime / target_timeline_duration if target_timeline_duration > 0 else None
+    planned_overlap_count = 0
+    previous_plan_end = -math.inf
+    for plan in sorted(plans, key=lambda item: (item.planned_start, item.segment_id)):
+        if plan.planned_start < previous_plan_end - 0.5 / settings.sample_rate:
+            planned_overlap_count += 1
+        previous_plan_end = max(previous_plan_end, plan.planned_end)
     return AlignmentRun(
         timeline_path=output_dir / "dubbed_timeline.wav",
         segments=segments,
@@ -342,4 +444,6 @@ def align_translated_transcript(
         rtf=rtf,
         peak_amplitude=peak_amplitude,
         clipping_count=clipping_count,
+        planned_overlap_count=planned_overlap_count,
+        actual_overlap_count=0,
     )

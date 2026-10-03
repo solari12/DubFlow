@@ -11,20 +11,20 @@ OverflowPolicy = Literal["preserve", "trim", "fail"]
 
 @dataclass(frozen=True, slots=True)
 class AudioAlignmentSettings:
-    min_stretch_factor: float = 0.90
+    min_stretch_factor: float = 0.85
     max_stretch_factor: float = 1.10
     pad_short_audio: bool = True
-    overflow_policy: OverflowPolicy = "preserve"
+    overflow_policy: OverflowPolicy = "trim"
     sample_rate: int = 16000
     channels: int = 1
     output_format: str = "wav"
     ffmpeg_path: str = "ffmpeg"
 
     def __post_init__(self) -> None:
-        if not 0.5 <= self.min_stretch_factor <= 1.0:
-            raise ValueError("Minimum stretch factor must be between 0.5 and 1.0")
-        if not 1.0 <= self.max_stretch_factor <= 2.0:
-            raise ValueError("Maximum stretch factor must be between 1.0 and 2.0")
+        if not 0.75 <= self.min_stretch_factor <= 1.0:
+            raise ValueError("Minimum stretch factor must be between 0.75 and 1.0")
+        if not 1.0 <= self.max_stretch_factor <= 1.25:
+            raise ValueError("Maximum stretch factor must be between 1.0 and 1.25")
         if self.min_stretch_factor > self.max_stretch_factor:
             raise ValueError("Minimum stretch factor must not exceed maximum")
         if self.sample_rate <= 0:
@@ -52,6 +52,20 @@ class AlignedSegment:
     output_audio_path: Path | None
     status: Literal["success", "overflow", "failed"]
     error: str | None = None
+    source_start: float | None = None
+    source_end: float | None = None
+    planned_start: float | None = None
+    planned_end: float | None = None
+    allowed_duration: float | None = None
+    overflow_before_fitting: bool = False
+    overflow_after_fitting: bool = False
+    requires_concise_rephrasing: bool = False
+    shortening_attempted: bool = False
+    shortened: bool = False
+    forcibly_truncated: bool = False
+    truncated_duration: float = 0.0
+    preserved_pause_before: float = 0.0
+    preserved_pause_after: float = 0.0
 
     def to_dict(self) -> dict:
         return {
@@ -68,6 +82,20 @@ class AlignedSegment:
             "output_audio_path": str(self.output_audio_path) if self.output_audio_path else None,
             "status": self.status,
             "error": self.error,
+            "source_start": self.source_start if self.source_start is not None else self.target_start,
+            "source_end": self.source_end if self.source_end is not None else self.target_end,
+            "planned_start": self.planned_start if self.planned_start is not None else self.target_start,
+            "planned_end": self.planned_end if self.planned_end is not None else self.target_end,
+            "allowed_duration": self.allowed_duration if self.allowed_duration is not None else self.target_duration,
+            "overflow_before_fitting": self.overflow_before_fitting,
+            "overflow_after_fitting": self.overflow_after_fitting,
+            "requires_concise_rephrasing": self.requires_concise_rephrasing,
+            "shortening_attempted": self.shortening_attempted,
+            "shortened": self.shortened,
+            "forcibly_truncated": self.forcibly_truncated,
+            "truncated_duration": self.truncated_duration,
+            "preserved_pause_before": self.preserved_pause_before,
+            "preserved_pause_after": self.preserved_pause_after,
         }
 
 
@@ -83,7 +111,9 @@ class AlignmentRun:
     rtf: float | None
     peak_amplitude: float
     clipping_count: int
-    overlap_policy: str = "sum_then_global_peak_normalize_to_0.99"
+    overlap_policy: str = "non_overlapping_dialogue; global_peak_normalize_to_0.99"
+    planned_overlap_count: int = 0
+    actual_overlap_count: int = 0
 
     @property
     def successful_count(self) -> int:
@@ -117,6 +147,17 @@ class AlignmentRun:
             "peak_amplitude": self.peak_amplitude,
             "clipping_count": self.clipping_count,
             "overlap_policy": self.overlap_policy,
+            "planned_overlap_count": self.planned_overlap_count,
+            "actual_overlap_count": self.actual_overlap_count,
+            "preserved_pause_count": sum(segment.preserved_pause_after > 0 for segment in self.segments),
+            "overflow_before_fitting_count": sum(segment.overflow_before_fitting for segment in self.segments),
+            "overflow_after_fitting_count": sum(segment.overflow_after_fitting for segment in self.segments),
+            "requires_concise_rephrasing_count": sum(
+                segment.requires_concise_rephrasing for segment in self.segments
+            ),
+            "forcibly_truncated_count": sum(segment.forcibly_truncated for segment in self.segments),
+            "shortened_segment_count": sum(segment.shortened for segment in self.segments),
+            "tts_duration_before_fitting": round(sum(segment.original_tts_duration or 0 for segment in self.segments), 6),
             "segments": [segment.to_dict() for segment in self.segments],
         }
 

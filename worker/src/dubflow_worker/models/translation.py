@@ -45,14 +45,18 @@ class TranslatedTranscript:
     source_language: str
     target_language: str
     segments: list[TranslatedSegment]
+    detected_language: str | None = None
+    source_language_overridden: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "version": "1.0",
             "translation": {
                 "engine": self.engine,
-                "source_language": self.source_language,
-                "target_language": self.target_language,
+                "detected_language": self.detected_language,
+                "translation_source_language": self.source_language,
+                "translation_target_language": self.target_language,
+                "source_language_overridden": self.source_language_overridden,
             },
             "segments": [segment.to_dict() for segment in self.segments],
         }

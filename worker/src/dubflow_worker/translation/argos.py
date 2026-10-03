@@ -56,3 +56,6 @@ class ArgosTranslationEngine(TranslationEngine):
             return ""
         translation = self._get_translation(source_language, target_language)
         return translation.translate(text)  # type: ignore[attr-defined]
+
+    def validate_language_pair(self, source_language: str, target_language: str) -> None:
+        self._get_translation(source_language, target_language)

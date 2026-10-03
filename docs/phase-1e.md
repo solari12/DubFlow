@@ -2,7 +2,7 @@
 
 ## Scope and architecture
 
-Phase 1E turns the Phase 1D segment WAVs into one time-aligned dubbed WAV. It uses the translated transcript's original `start`, `end`, `speaker`, and segment ID as timeline metadata, while placing each generated Vietnamese clip at its original segment start. It does not move the transcript timestamps, render video, mix source/background audio, or assign different voices.
+Phase 1E turns the Phase 1D segment WAVs into one time-aligned dubbed WAV. It uses the translated transcript's original `start`, `end`, `speaker`, and segment ID as timeline metadata, while placing each generated Vietnamese clip at its original segment start. Phase 1H adds a deterministic planning pass that caps ordinary dialogue clips at their allocated source windows before mixing. It does not render video, mix source/background audio, or assign different voices.
 
 Input is the Phase 1D benchmark JSON, whose `segments` entries include the original transcript data and an `audio.audio_path`. The pipeline reuses that path mapping; where it is absent, it resolves the conventional `segment-{id:04d}.wav` filename from the supplied TTS audio directory. Segment IDs must be unique. Missing or malformed audio fails only that segment, leaves its target time window silent, and processing continues without shifting later segments.
 
@@ -14,10 +14,10 @@ For each segment, the target duration is `end - start`; audio metadata is read f
 
 - If TTS is shorter, the pipeline preserves the samples and appends silence to the target duration. Set `--no-pad-short` to leave the short clip as-is.
 - If TTS is longer but the factor falls within `--min-stretch` and `--max-stretch` (defaults `0.90` and `1.10`), FFmpeg `atempo` speeds it up with pitch preservation. It adjusts the result by at most sample rounding to match the target frame count.
-- If the required factor is outside those bounds, the default `--overflow-policy preserve` keeps the complete clip and marks the segment `overflow`. The final timeline extends to include that clip, even if it runs past the transcript's maximum end. `trim` explicitly truncates to the target window; `fail` excludes that clip from the timeline. No large overrun is silently shortened.
+- If the required factor is outside those bounds, the current default `--overflow-policy trim` applies only the configured maximum safe speed-up, then explicitly truncates the tail to the allocated source window. The segment remains marked overflow, with `requires_concise_rephrasing`, `forcibly_truncated`, and truncated duration recorded. `preserve` remains an explicit legacy option; its excess duration shifts later planned dialogue while keeping it non-overlapping. `fail` excludes that clip from the timeline.
 - Invalid/empty WAVs and missing files become `failed` segment records. The remaining segments are still aligned.
 
-The final timeline covers silence from time zero through the latest target end, or farther if preserved overflow audio extends past it. Overlapping audio is mixed by summing clips in deterministic `(start, segment_id)` order. If the summed peak exceeds 0.99 full scale, a single global gain reduction brings the entire mix to 0.99; this preserves both clips without clipping. Gaps remain zero-valued silence. The overlap policy is recorded in both metadata files.
+The default dialogue timeline covers silence from time zero through the latest source end. The planner preserves each source gap, schedules segments in their source order, and ensures that an overlong clip cannot run into the next ordinary dialogue segment. The final mix retains the existing global 0.99 peak protection; gaps remain zero-valued silence. The mixer can still sum intentionally overlapping audio supplied to its lower-level interface, while the ordinary transcript pipeline rejects any overlap introduced by its plan. See [Phase 1H](phase-1h.md) for the validation report and audio timing limitations.
 
 ## Run commands
 
@@ -29,7 +29,7 @@ worker/.venv/Scripts/python.exe worker/scripts/align_audio.py `
   output/phase1d/benchmark/audio `
   --output output/phase1e `
   --min-stretch 0.90 --max-stretch 1.10 `
-  --overflow-policy preserve --sample-rate 16000 --channels 1
+  --overflow-policy trim --sample-rate 16000 --channels 1
 ```
 
 Run the timing and peak report command (it also writes `alignment.json` and WAV outputs):
@@ -60,7 +60,7 @@ The benchmark used the four actual clips under `output/phase1d/benchmark/audio`.
 | Output WAV | 16 kHz, mono, PCM s16le |
 | Peak amplitude / clipped samples | 0.565674 / 0 |
 
-The long clip began at 26.96 s with a target end of 33.18 s. Its original TTS duration was 7.9045 s, longer than the 6.22 s target window by 1.6845 s. The configured preserve policy retained it, so the output timeline ends at 34.8645 s. This is explicit overflow, not a timeline shift: all later clips, if any, keep their original start times.
+This recorded Phase 1E benchmark explicitly used the legacy `preserve` policy. Its long clip began at 26.96 s with a target end of 33.18 s. Its original TTS duration was 7.9045 s, longer than the 6.22 s target window by 1.6845 s. The configured policy retained it, so the output timeline ended at 34.8645 s. Current default behavior is documented above and validated in Phase 1H.
 
 Validation reopened the final timeline and every aligned segment WAV, confirmed nonzero audio metadata and the reported duration, checked that the gap from 7.72 s to 15.98 s remains silent, and confirmed segment IDs, speaker labels, and time windows are preserved. Clipping count is zero. This validates technical format and placement only; no listening evaluation was performed.
 

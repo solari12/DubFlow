@@ -6,7 +6,9 @@ import wave
 from pathlib import Path
 
 from dubflow_worker.models.alignment import AudioAlignmentSettings
+from dubflow_worker.models.alignment import AlignedSegment
 from dubflow_worker.pipeline.align_audio import align_translated_transcript
+from dubflow_worker.pipeline.align_audio import _mix_timeline
 
 
 def _write_wav(
@@ -54,6 +56,13 @@ def _duration(path: Path) -> float:
         return audio.getnframes() / audio.getframerate()
 
 
+def test_quality_alignment_defaults_to_conservative_stretch_limits() -> None:
+    settings = AudioAlignmentSettings()
+    assert settings.min_stretch_factor == 0.85
+    assert settings.max_stretch_factor == 1.10
+    assert settings.overflow_policy == "trim"
+
+
 def test_exact_duration_match(tmp_path: Path) -> None:
     wav = tmp_path / "tts" / "segment-0000.wav"
     _write_wav(wav, 0.5)
@@ -95,11 +104,15 @@ def test_slight_overrun_uses_bounded_pitch_preserving_stretch(tmp_path: Path) ->
     assert _duration(segment.output_audio_path) == 0.5
 
 
-def test_significant_overrun_is_preserved_and_marked_overflow(tmp_path: Path) -> None:
+def test_explicit_preserve_policy_remains_available_for_single_clip(tmp_path: Path) -> None:
     wav = tmp_path / "tts" / "segment-0000.wav"
     _write_wav(wav, 0.8)
 
-    run = _align(tmp_path, [_segment(0, wav, 0.0, 0.5, "SPEAKER_00")])
+    run = _align(
+        tmp_path,
+        [_segment(0, wav, 0.0, 0.5, "SPEAKER_00")],
+        AudioAlignmentSettings(overflow_policy="preserve"),
+    )
     segment = run.segments[0]
 
     assert segment.status == "overflow"
@@ -119,7 +132,7 @@ def test_overflow_policy_can_explicitly_trim(tmp_path: Path) -> None:
     )
 
     assert run.segments[0].status == "overflow"
-    assert run.segments[0].alignment_action == "overflow_trim"
+    assert run.segments[0].alignment_action == "overflow_truncate_after_bounded_stretch"
     assert "truncated" in run.segments[0].error.lower()
     assert _duration(run.segments[0].output_audio_path) == 0.5
 
@@ -208,20 +221,43 @@ def test_overlapping_segments_are_summed_and_peak_normalized(tmp_path: Path) -> 
     _write_wav(first, 0.5, amplitude=0.8)
     _write_wav(second, 0.5, amplitude=0.8)
 
-    run = _align(
-        tmp_path,
-        [
-            _segment(0, first, 0.0, 0.5, "SPEAKER_00"),
-            _segment(1, second, 0.0, 0.5, "SPEAKER_01"),
-        ],
+    overlapping = [
+        AlignedSegment(
+            i, speaker, 0.0, 0.5, 0.5, 0.5, 0.5, 0.0, 1.0,
+            "exact", path, "success",
+        )
+        for i, (speaker, path) in enumerate((
+            ("SPEAKER_00", first), ("SPEAKER_01", second)
+        ))
+    ]
+    duration, peak, clipping_count = _mix_timeline(
+        overlapping, target_duration=0.5, settings=AudioAlignmentSettings(),
+        output_path=tmp_path / "legacy-overlap-mix.wav",
     )
 
-    assert run.overlap_policy == "sum_then_global_peak_normalize_to_0.99"
-    assert run.peak_amplitude <= 0.99
-    assert run.clipping_count == 0
-    with wave.open(str(run.timeline_path), "rb") as audio:
+    assert duration == 0.5
+    assert peak <= 0.99
+    assert clipping_count == 0
+    with wave.open(str(tmp_path / "legacy-overlap-mix.wav"), "rb") as audio:
         values = struct.unpack("<" + "h" * audio.getnframes(), audio.readframes(audio.getnframes()))
     assert max(abs(value) for value in values) < 32767
+
+
+def test_default_severe_overflow_is_bounded_and_reported_as_truncated(tmp_path: Path) -> None:
+    wav = tmp_path / "tts" / "segment-0000.wav"
+    _write_wav(wav, 0.8)
+
+    run = _align(tmp_path, [_segment(0, wav, 0.0, 0.5, "SPEAKER_00")])
+    segment = run.segments[0]
+
+    assert segment.status == "overflow"
+    assert segment.requires_concise_rephrasing is True
+    assert segment.overflow_before_fitting is True
+    assert segment.overflow_after_fitting is True
+    assert segment.forcibly_truncated is True
+    assert segment.truncated_duration > 0
+    assert _duration(segment.output_audio_path) == 0.5
+    assert run.total_duration == 0.5
 
 
 def test_empty_transcript_creates_empty_timeline(tmp_path: Path) -> None:
