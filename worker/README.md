@@ -159,6 +159,30 @@ worker/.venv-tts/Scripts/python.exe worker/scripts/benchmark_tts.py `
 
 The report is `output/phase1d/benchmark/tts-benchmark.json`. See [Phase 1D](../docs/phase-1d.md) for the selected voice's limitations, license notes, smoke check, and measured results.
 
+## Audio alignment benchmark
+
+Phase 1E takes the Phase 1D benchmark JSON and its audio directory. It reuses each segment's `audio.audio_path` mapping, aligns the clip to its transcript window, and writes one PCM WAV timeline plus segment-level aligned WAVs and metadata:
+
+```powershell
+worker/.venv/Scripts/python.exe worker/scripts/align_audio.py `
+  output/phase1d/benchmark/tts-benchmark.json `
+  output/phase1d/benchmark/audio `
+  --output output/phase1e `
+  --min-stretch 0.90 --max-stretch 1.10 `
+  --overflow-policy preserve --sample-rate 16000 --channels 1
+```
+
+Benchmark the same run with:
+
+```powershell
+worker/.venv/Scripts/python.exe worker/scripts/benchmark_alignment.py `
+  output/phase1d/benchmark/tts-benchmark.json `
+  output/phase1d/benchmark/audio `
+  --output output/phase1e
+```
+
+The default behavior pads short clips with silence, uses bounded pitch-preserving FFmpeg time-stretch for slight overruns, and preserves longer overruns while marking them `overflow`. The timeline sums overlapping clips and applies global peak limiting only if their sum would exceed 0.99 full scale. See [Phase 1E](../docs/phase-1e.md) for the algorithm, policies, and measured run.
+
 ## CUDA verification record
 
 Verified on 2026-10-02 with Python 3.11.17, faster-whisper 1.2.1, CTranslate2 4.8.2, NVIDIA GeForce RTX 3050 Laptop GPU (4096 MiB), and driver 610.62. `nvidia-smi` reports CUDA UMD 13.3; this is the driver capability, not the installed toolkit version. `CUDA_PATH` and `PATH` referenced a CUDA 11.8 directory that was absent on disk. No CUDA 12 cuBLAS DLL was present in the worker environment, CTranslate2 package, or configured toolkit location. The missing component was `cublas64_12.dll`.
