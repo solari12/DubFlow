@@ -80,9 +80,9 @@ $env:UV_PROJECT_ENVIRONMENT = Join-Path (Get-Location) 'worker/.venv-diarization
 uv sync --project worker --extra diarization --no-install-project
 ```
 
-The model `pyannote/speaker-diarization-community-1` is gated. Sign in to Hugging Face, accept the [model conditions](https://huggingface.co/pyannote/speaker-diarization-community-1), then use `worker/.venv-diarization/Scripts/hf.exe auth login` to save auth in Hugging Face's local user cache. Never commit tokens. Windows TorchCodec also needs a working FFmpeg shared library for file-path decoding; the existing `imageio-ffmpeg` executable alone did not pass pyannote's TorchCodec import check on this machine. The adapter's audio-file path needs follow-up before fixture inference. The ASR environment remains separate and unchanged.
+The model `pyannote/speaker-diarization-community-1` is gated. Sign in to Hugging Face, accept the [model conditions](https://huggingface.co/pyannote/speaker-diarization-community-1), then use `worker/.venv-diarization/Scripts/hf.exe auth login` to save auth in Hugging Face's local user cache. Never commit tokens. On Windows, TorchCodec's DLL loader cannot load its core DLL or a dependency in this environment. DubFlow's diarization loader uses the existing FFmpeg extractor to create mono 16 kHz audio and passes an in-memory tensor to pyannote, avoiding TorchCodec file decoding. CUDA model load and real fixture inference have been validated. The ASR environment remains separate and unchanged.
 
-After model access and the TorchCodec file-decoding requirement are configured, run from the repository root:
+After model access is configured, run the standalone Phase 1B.1 benchmark from the repository root:
 
 ```powershell
 uv run --project worker --extra diarization python worker/scripts/benchmark_diarization.py `
@@ -93,6 +93,18 @@ uv run --project worker --extra diarization python worker/scripts/benchmark_diar
 ```
 
 The runner records model loading separately from inference, computes inference RTF, and distinguishes sampled whole-device VRAM from PyTorch process peak counters. See [Phase 1B.1](../docs/phase-1b1.md) for sample provenance, current access/runtime status, and limitations.
+
+## Speaker-aware transcription benchmark
+
+To run faster-whisper `base` followed by Community-1 diarization and temporal-overlap speaker assignment:
+
+```powershell
+worker/.venv/Scripts/python.exe worker/scripts/benchmark_speaker_transcription.py `
+  input/phase1b1/two-voice-alternating.wav `
+  --output output/phase1b2/speaker-transcription-benchmark.json
+```
+
+The ASR child process exits before the diarization child starts, releasing the ASR model and CUDA context before pyannote loads. Speaker labels use the greatest single-turn overlap, with a default 20% overlap ratio threshold. The report includes actual ASR text, speaker labels, overlap measurements, stage timings, RTF, and sampled whole-GPU memory. The Phase 1B.2 result and test status are documented in [Phase 1B.2](../docs/phase-1b2.md).
 
 ## CUDA verification record
 

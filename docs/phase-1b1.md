@@ -23,11 +23,11 @@ Verified in that isolated environment:
 - `torch.cuda.is_available()`: `True`; device: NVIDIA GeForce RTX 3050 Laptop GPU (4096 MiB), driver 610.62.
 - `pyannote.audio`: `4.0.7`; `from pyannote.audio import Pipeline` succeeds.
 - torchvision is not installed and is not required by pyannote.audio.
-- Hugging Face authentication: **not configured** (checked environment variables and local Hugging Face auth cache without printing token contents).
+- Hugging Face access: configured locally; Community-1 model loading and inference completed. No token is stored in this repository.
 
 The original `worker/.venv/` remains at faster-whisper 1.2.1, CTranslate2 4.8.2, imageio-ffmpeg 0.6.0, and nvidia-cublas-cu12 12.6.4.1. No machine-wide CUDA Toolkit or driver was installed or changed.
 
-Pyannote’s import emits a TorchCodec warning: Windows could not load `libtorchcodec_core8.dll` or one of its dependencies, so file-based audio decoding is not verified. Pyannote supports in-memory waveform input; the current adapter still passes a file path. This must be resolved or the adapter changed before running the audio fixture. No model load or inference was attempted.
+Pyannote emits a TorchCodec warning on Windows because its DLL loader cannot load `libtorchcodec_core8.dll` (or a required dependency). The diagnostic names a full-shared FFmpeg build, Torch/TorchCodec compatibility, or another runtime DLL as possible causes; the exact missing dependency was not identified. DubFlow keeps the matched PyTorch/pyannote stack and uses its FFmpeg extractor to decode and resample audio, then supplies pyannote an in-memory `{"waveform": tensor, "sample_rate": 16000}` mapping. This avoids TorchCodec file decoding while the import warning remains.
 
 ### Hugging Face access
 
@@ -37,22 +37,32 @@ Community-1 is gated and licensed CC BY 4.0. To configure access without putting
 2. In PowerShell from the DubFlow root, set `UV_PROJECT_ENVIRONMENT` as shown above and run `worker/.venv-diarization/Scripts/hf.exe auth login`. Complete its browser/token prompt; Hugging Face stores the credential in its local user cache, outside the repository.
 3. Verify only the presence of authentication with `worker/.venv-diarization/Scripts/python.exe -c "from huggingface_hub import get_token; print('HF_TOKEN configured:', bool(get_token()))"`.
 
-Current status: **Environment is ready, but Hugging Face model access is not configured.** Per the phase stop condition, the model was not loaded. There is no model initialization time or post-load GPU memory observation.
+Current status: isolated environment setup, gated model access, model loading, and real CUDA inference are verified. Earlier statements about unavailable model access describe the initial setup attempt and have been superseded by the benchmark below.
 
-### Future benchmark command (not run in this phase)
+## Windows decoding workaround and benchmark result
 
-After model access is configured and the TorchCodec audio-path warning is resolved, the separate environment can run the Phase 1B.1 benchmark:
+`AudioExtractor` asks FFmpeg to decode the input directly to a temporary mono, 16 kHz, 16-bit PCM WAV. The new waveform loader converts that normalized WAV to a float32 tensor shaped `(channel, time)` and passes the tensor mapping to pyannote. This keeps the audio-loading route inside DubFlow's existing FFmpeg infrastructure and does not read the original media into Python before conversion. The diarization model, CUDA device, and speaker constraints remain unchanged.
+
+The requested command completed successfully on `input/phase1b1/two-voice-alternating.wav`:
+
+| Measurement | Result |
+| --- | ---: |
+| Model load | 13.671 s |
+| Diarization inference | 46.895 s |
+| Total runtime, including decode | 62.658 s |
+| RTF | 1.4125 |
+| Detected speakers | 2 |
+| Diarization segments | 9 |
+| Sampled whole-device GPU memory | 3925 MiB / 4096 MiB |
+| Error | None |
+
+The pipeline loaded successfully and then performed real CUDA inference; these are separate successes, and both occurred. The report is at `output/phase1b1/diarization-benchmark.json`. The model's output included a final turn extending past the waveform duration, so the benchmark clips returned turns to the audio bounds before validating and serializing them.
+
+Re-run from the DubFlow root with:
 
 ```powershell
-$env:UV_PROJECT_ENVIRONMENT = Join-Path (Get-Location) 'worker/.venv-diarization'
-uv run --project worker --extra diarization python worker/scripts/benchmark_diarization.py `
-  input/phase1b1/two-voice-alternating.wav `
-  --model pyannote/speaker-diarization-community-1 `
-  --device cuda --min-speakers 2 --max-speakers 2 `
-  --output output/phase1b1/diarization-benchmark.json
+worker/.venv-diarization/Scripts/python.exe worker/scripts/benchmark_diarization.py input/phase1b1/two-voice-alternating.wav --model pyannote/speaker-diarization-community-1 --device cuda --min-speakers 2 --max-speakers 2 --output output/phase1b1/diarization-benchmark.json
 ```
-
-That benchmark is intentionally outside Phase 1B.1.1. It records model-load and inference times, RTF, sampled whole-device memory separately from PyTorch process allocation/peaks, and structured speaker turns. It does not silently fall back to CPU.
 
 ## Sample
 
@@ -68,30 +78,22 @@ This is a controlled two-voice engineering fixture, not natural dialogue. It per
 
 ## Hardware and benchmark status
 
-Target hardware: NVIDIA GeForce RTX 3050 Laptop GPU, 4096 MiB VRAM, driver 610.62, Windows, Python 3.11.17. Torch CUDA is now verified in the isolated diarization environment, but the model remains gated and no Hugging Face authentication is configured. Therefore **no model-load, model VRAM, inference, RTF, or detected-speaker result is claimed**.
-
-Sampled `nvidia-smi` memory is whole-device usage and may miss short peaks; it is not process allocation. PyTorch's peak allocated/reserved counters are separate process-level observations and are only populated for CUDA runs. No CUDA outcome should be inferred from a model access/authentication failure.
+Target hardware: NVIDIA GeForce RTX 3050 Laptop GPU, 4096 MiB VRAM, driver 610.62, Windows, Python 3.11.17. The benchmark measured 3925 MiB of whole-device GPU memory at its sampled peak, close to device capacity. Whole-device samples may miss short peaks and include other GPU users. The JSON also reports PyTorch allocator counters separately. In this run, their reserved/peak values (9470 MiB) exceeded physical VRAM and disagreed with the sampled device measurement; treat those allocator figures as unreliable on this Windows run.
 
 ## Limitations and next-step suitability
 
 - Community-1 requires a Hugging Face account, accepted model conditions, and a token or already accessible local cache.
-- CUDA requires a CUDA-enabled PyTorch build compatible with the installed NVIDIA driver. The pyannote package alone does not prove CUDA support or fit within 4 GB.
-- The benchmark has not yet established GPU fit, speed, memory, or diarization quality on this laptop because the model could not be loaded without model access and a PyTorch runtime.
+- GPU inference completed on this fixture, but the sampled whole-device peak was close to the RTX 3050 Laptop GPU capacity. This does not establish fit for longer media or concurrent workloads.
+- The benchmark establishes successful GPU inference and runtime on this fixture. The sampled whole-device peak was close to the RTX 3050 Laptop GPU capacity; the synthetic fixture does not establish diarization quality for natural conversation.
 - The synthetic, alternating English/Vietnamese sample is much easier and less representative than overlapping natural conversation.
 - Maximum-overlap ASR assignment is a timestamp-based prototype; it does not resolve word-level overlap or diarization errors.
 
-This candidate is suitable for continuing the benchmark only after Hugging Face model access and CUDA PyTorch are available. The next phase should choose a production approach only after a successful local run and listening-based inspection; this document does not start that phase.
+The benchmark is ready for later product evaluation after listening-based inspection on representative dialogue. This document does not start that next phase.
 
 ### Earlier Phase 1B.1 attempt
 
-The exact run command above was attempted on the 33.2-second fixture. It failed before loading the model because `pyannote.audio` and PyTorch are not installed:
-
-```text
-RuntimeError: Diarization dependencies are missing. Install the worker's diarization extra and a CUDA-enabled PyTorch build for GPU inference.
-```
-
-The JSON report at `output/phase1b1/diarization-benchmark.json` records `success: false` and the pre-install missing-runtime error. That report predates this environment setup; no benchmark was rerun in Phase 1B.1.1.
+An earlier setup attempt failed before model loading because the diarization dependencies were not yet installed. That historical failure was superseded by the successful run above; the JSON report at `output/phase1b1/diarization-benchmark.json` now contains the successful inference results.
 
 ## Verification
 
-GPU-independent unit tests cover result parsing/serialization, timestamp validation, and maximum-overlap ASR assignment. Full-suite verification after environment setup: **22 passed**.
+Full worker test suite, including FFmpeg waveform decoding and tensor shape/sample-rate checks: **23 passed**. The helper test uses CPU audio tensors and does not require CUDA inference.

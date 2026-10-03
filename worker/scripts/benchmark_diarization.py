@@ -11,8 +11,12 @@ import threading
 import time
 from pathlib import Path
 
+if __package__ in (None, ""):
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
+
 from dubflow_worker.audio.extractor import AudioExtractionError, AudioExtractor
 from dubflow_worker.diarization.base import DiarizationResult
+from dubflow_worker.diarization.audio import load_audio_waveform
 from dubflow_worker.diarization.pyannote import PyannoteDiarizer
 from dubflow_worker.config.settings import Settings
 
@@ -141,55 +145,55 @@ def main(argv: list[str] | None = None) -> int:
     }
     sampler = NvidiaSmiSampler()
     diarizer = None
-    runtime_started: float | None = None
+    total_started = time.perf_counter()
     try:
-        with extractor.extract(args.input) as audio:
-            report["audio_duration_seconds"] = round(audio.duration, 3)
-            sampler.start()
-            try:
-                import torch
-                if args.device == "cuda" and torch.cuda.is_available():
-                    torch.cuda.reset_peak_memory_stats()
-            except (ImportError, RuntimeError):
-                pass
-            runtime_started = time.perf_counter()
-            load_started = time.perf_counter()
-            try:
-                diarizer = PyannoteDiarizer(
-                    args.model, args.device,
-                    token=os.environ.get("HF_TOKEN") or os.environ.get("HUGGING_FACE_HUB_TOKEN"),
-                )
-            finally:
-                report["model_load_seconds"] = round(time.perf_counter() - load_started, 3)
-            started = time.perf_counter()
-            output = diarizer.diarize(audio.path, args.min_speakers, args.max_speakers)
-            processing = time.perf_counter() - started
-            report["diarization_seconds"] = round(processing, 3)
-            report["processing_seconds"] = round(processing, 3)
-            report["total_runtime_seconds"] = round(time.perf_counter() - runtime_started, 3)
-            report["rtf"] = round(processing / audio.duration, 4) if audio.duration else None
-            annotation = getattr(output, "speaker_diarization", output)
-            tracks = (
-                (turn.start, turn.end, speaker)
-                for turn, _, speaker in annotation.itertracks(yield_label=True)
+        audio = load_audio_waveform(args.input, extractor)
+        waveform = audio["waveform"]
+        duration = waveform.shape[-1] / audio["sample_rate"]
+        report["audio_duration_seconds"] = round(duration, 3)
+        sampler.start()
+        try:
+            import torch
+            if args.device == "cuda" and torch.cuda.is_available():
+                torch.cuda.reset_peak_memory_stats()
+        except (ImportError, RuntimeError):
+            pass
+        load_started = time.perf_counter()
+        try:
+            diarizer = PyannoteDiarizer(
+                args.model, args.device,
+                token=os.environ.get("HF_TOKEN") or os.environ.get("HUGGING_FACE_HUB_TOKEN"),
             )
-            result = DiarizationResult.from_tracks(
-                tracks, filename=args.input.name, duration=audio.duration,
-                engine=PyannoteDiarizer.name, model=args.model, device=args.device,
-            )
-            report["speaker_count"] = len(result.speakers)
-            report["segment_count"] = len(result.segments)
-            report["result"] = result.to_dict()
-            report["success"] = True
-            report.update(_torch_memory(args.device))
+        finally:
+            report["model_load_seconds"] = round(time.perf_counter() - load_started, 3)
+        started = time.perf_counter()
+        output = diarizer.diarize(audio, args.min_speakers, args.max_speakers)
+        processing = time.perf_counter() - started
+        report["diarization_seconds"] = round(processing, 3)
+        report["processing_seconds"] = round(processing, 3)
+        report["rtf"] = round(processing / duration, 4) if duration else None
+        annotation = getattr(output, "speaker_diarization", output)
+        tracks = (
+            (max(0.0, turn.start), min(duration, turn.end), speaker)
+            for turn, _, speaker in annotation.itertracks(yield_label=True)
+            if max(0.0, turn.start) < min(duration, turn.end)
+        )
+        result = DiarizationResult.from_tracks(
+            tracks, filename=args.input.name, duration=duration,
+            engine=PyannoteDiarizer.name, model=args.model, device=args.device,
+        )
+        report["speaker_count"] = len(result.speakers)
+        report["segment_count"] = len(result.segments)
+        report["result"] = result.to_dict()
+        report["success"] = True
+        report.update(_torch_memory(args.device))
     except Exception as exc:
-        if runtime_started is not None:
-            report["total_runtime_seconds"] = round(time.perf_counter() - runtime_started, 3)
         report["error"] = f"{type(exc).__name__}: {exc}"
         print(f"Diarization benchmark failed: {report['error']}", file=sys.stderr)
     finally:
         sampler.stop()
         report["sampled_whole_gpu_memory_mib"] = sampler.maximum_mib
+        report["total_runtime_seconds"] = round(time.perf_counter() - total_started, 3)
         if diarizer:
             diarizer.close()
     try:

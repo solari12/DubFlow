@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from pathlib import Path
+from typing import Any, Mapping
 
 
 class PyannoteDiarizer:
@@ -21,14 +21,14 @@ class PyannoteDiarizer:
         self.pipeline = Pipeline.from_pretrained(model, token=token)
         self.pipeline.to(torch.device(device))
 
-    def diarize(self, audio_path: Path, min_speakers: int | None = None,
+    def diarize(self, audio: Mapping[str, Any], min_speakers: int | None = None,
                 max_speakers: int | None = None):
         options = {}
         if min_speakers is not None:
             options["min_speakers"] = min_speakers
         if max_speakers is not None:
             options["max_speakers"] = max_speakers
-        return self.pipeline(str(audio_path), **options)
+        return self.pipeline(dict(audio), **options)
 
     def close(self) -> None:
         del self.pipeline
