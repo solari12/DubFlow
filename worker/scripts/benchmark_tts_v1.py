@@ -15,17 +15,33 @@ from dubflow_worker.tts.benchmark_v1 import (  # noqa: E402
     benchmark_provider,
     write_provider_report,
 )
+from dubflow_worker.tts.cuda_benchmark_v1 import (  # noqa: E402
+    render_cuda_benchmark_markdown,
+    run_korva_cuda_benchmark,
+)
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Offline, benchmark-only Vietnamese TTS comparison")
     parser.add_argument("--provider", choices=("all", "piper", "korva"), default="all")
+    parser.add_argument("--device", choices=("cpu", "cuda"), default="cpu")
     parser.add_argument("--output", type=Path, default=REPO / "output/tts-benchmark-v1")
     parser.add_argument("--fixture", type=Path, default=REPO / "output/tts-benchmark-v1/fixture.json")
     parser.add_argument("--piper-model-dir", type=Path, default=ROOT / ".model-cache/tts/vits-piper-vi_VN-vivos-x_low")
     parser.add_argument("--korva-voice", default="khanh_vy")
     parser.add_argument("--korva-steps", type=int, default=32)
     args = parser.parse_args(argv)
+    if args.device == "cuda":
+        if args.provider != "korva":
+            parser.error("CUDA benchmark mode supports only --provider korva; Piper's existing CPU benchmark is unchanged")
+        fixture = TTSBenchmarkFixture.load(args.fixture)
+        cuda_dir = args.output / "korvatts-cuda"
+        cpu_report_path = args.output / "korvatts/report.json"
+        report = run_korva_cuda_benchmark(fixture, cuda_dir, cpu_report_path)
+        (cuda_dir / "report.json").write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        (cuda_dir / "benchmark-report.md").write_text(render_cuda_benchmark_markdown(report), encoding="utf-8")
+        print(json.dumps({"provider": "korvatts-cuda", "status": report["status"], "initialization_status": report["initialization_status"], "cases": len(report["cases"])}, ensure_ascii=True, indent=2))
+        return 0 if report["status"] == "CUDA_SUPPORTED" else 1
     fixture = TTSBenchmarkFixture.load(args.fixture)
     cases = fixture.cases()
     providers = []
