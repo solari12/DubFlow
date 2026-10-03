@@ -106,6 +106,32 @@ worker/.venv/Scripts/python.exe worker/scripts/benchmark_speaker_transcription.p
 
 The ASR child process exits before the diarization child starts, releasing the ASR model and CUDA context before pyannote loads. Speaker labels use the greatest single-turn overlap, with a default 20% overlap ratio threshold. The report includes actual ASR text, speaker labels, overlap measurements, stage timings, RTF, and sampled whole-GPU memory. The Phase 1B.2 result and test status are documented in [Phase 1B.2](../docs/phase-1b2.md).
 
+## Translation benchmark
+
+Phase 1C adds a provider-neutral `TranslationEngine` interface and an offline Argos Translate adapter. Argos is an optional dependency and should be installed into the diarization environment on this Windows GPU setup so its transitive dependencies do not alter the ASR environment. From the repository root:
+
+```powershell
+$env:UV_PROJECT_ENVIRONMENT = Join-Path (Get-Location) 'worker/.venv-diarization'
+uv sync --project worker --extra diarization --extra translation --no-install-project
+
+$env:ARGOS_PACKAGES_DIR = Join-Path (Get-Location) 'worker/.model-cache/argos-packages'
+$env:XDG_CONFIG_HOME = Join-Path (Get-Location) 'worker/.model-cache/argos-config'
+$env:XDG_DATA_HOME = Join-Path (Get-Location) 'worker/.model-cache/argos-data'
+$env:XDG_CACHE_HOME = Join-Path (Get-Location) 'worker/.model-cache/argos-cache'
+worker/.venv-diarization/Scripts/argospm.exe install translate-en_vi
+```
+
+Argos downloads model weights on first setup; its bundled English sentence splitter may also be fetched on first use. Translation runs on CPU. The benchmark accepts a Phase 1B.2 speaker-aware transcript and preserves its IDs, times, and speakers:
+
+```powershell
+worker/.venv-diarization/Scripts/python.exe worker/scripts/benchmark_translation.py `
+  output/phase1b2/speaker-transcription-benchmark.json `
+  --source-language en --target-language vi `
+  --output output/phase1c/translation-benchmark.json
+```
+
+See [Phase 1C](../docs/phase-1c.md) for engine details, the recorded run, and its language and quality limitations.
+
 ## CUDA verification record
 
 Verified on 2026-10-02 with Python 3.11.17, faster-whisper 1.2.1, CTranslate2 4.8.2, NVIDIA GeForce RTX 3050 Laptop GPU (4096 MiB), and driver 610.62. `nvidia-smi` reports CUDA UMD 13.3; this is the driver capability, not the installed toolkit version. `CUDA_PATH` and `PATH` referenced a CUDA 11.8 directory that was absent on disk. No CUDA 12 cuBLAS DLL was present in the worker environment, CTranslate2 package, or configured toolkit location. The missing component was `cublas64_12.dll`.

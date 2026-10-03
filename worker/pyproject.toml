@@ -21,6 +21,7 @@ diarization = [
     "torchaudio==2.11.0",
     "torchcodec==0.15.0",
 ]
+translation = ["argostranslate==1.11.0"]
 
 [[tool.uv.index]]
 name = "pytorch-cu130"
