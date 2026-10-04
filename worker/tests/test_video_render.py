@@ -57,7 +57,7 @@ def media(tmp_path: Path, ffmpeg: str) -> tuple[Path, Path]:
     video = tmp_path / "source.mp4"
     audio = tmp_path / "dubbed.wav"
     _make_video(ffmpeg, video)
-    _make_wav(audio, 2.5)
+    _make_wav(audio, 1.99)
     return video, audio
 
 
@@ -128,7 +128,7 @@ def test_render_copies_video_replaces_audio_and_validates_streams(media: tuple[P
     assert result.audio_codec == "aac"
     assert output.is_file() and output.stat().st_size > 0
     assert result.output_duration == pytest.approx(result.source_video_duration, abs=0.12)
-    assert result.duration_policy == "trim_audio_to_video_duration"
+    assert result.duration_policy == "pad_audio_with_trailing_silence_to_video_duration"
 
     decoded = tmp_path / "decoded.wav"
     subprocess.run(
@@ -144,6 +144,35 @@ def test_render_copies_video_replaces_audio_and_validates_streams(media: tuple[P
     crossing_count = sum((left <= 0 < right) for left, right in zip(samples, samples[1:]))
     estimated_frequency = crossing_count / (len(samples) / 16000)
     assert estimated_frequency == pytest.approx(880, abs=30)  # source track was 220 Hz
+
+
+def test_render_extends_video_and_preserves_audio_that_outlasts_source(
+    media: tuple[Path, Path], tmp_path: Path
+) -> None:
+    video, _short_audio = media
+    too_long = tmp_path / "too-long.wav"
+    _make_wav(too_long, 2.5)
+    output = tmp_path / "extended.mp4"
+    result = _renderer().render(video, too_long, output)
+    assert result.status == "success", result.error
+    assert result.duration_policy == "extend_video_with_frozen_last_frame_to_preserve_audio"
+    assert not result.video_stream_copied
+    assert result.dubbed_audio_duration == pytest.approx(2.5)
+    assert result.output_duration == pytest.approx(2.5, abs=0.12)
+
+    decoded = tmp_path / "extended-audio.wav"
+    subprocess.run(
+        [AudioExtractor()._resolve_executable("ffmpeg"), "-hide_banner", "-loglevel", "error", "-y",
+         "-i", str(output), "-map", "0:a:0", "-ac", "1", "-ar", "16000", str(decoded)],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    with wave.open(str(decoded), "rb") as wav:
+        samples = array("h")
+        samples.frombytes(wav.readframes(wav.getnframes()))
+    assert len(samples) / 16000 == pytest.approx(2.5, abs=0.12)
+    assert max(abs(sample) for sample in samples[int(2.1 * 16000):]) > 100
 
 
 def test_short_dubbed_audio_is_padded_to_video_duration(tmp_path: Path, ffmpeg: str) -> None:

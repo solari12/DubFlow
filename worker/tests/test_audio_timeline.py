@@ -89,6 +89,21 @@ def test_severe_overflow_requires_concise_rephrasing(tmp_path: Path) -> None:
     assert plan.requires_concise_rephrasing is True
 
 
+def test_exhausted_source_window_spills_forward_instead_of_failing(tmp_path: Path) -> None:
+    plans = plan_dialogue_timeline(
+        _inputs(tmp_path, [
+            (0.0, 0.1, 1.0, "SPEAKER_00"),
+            (0.1, 0.2, 0.3, "SPEAKER_01"),
+        ]),
+        preserve_overflow=True,
+    )
+
+    assert plans[1].allowed_duration == 1 / 16000
+    assert plans[1].overflow_before_fitting is True
+    assert plans[1].planned_start >= plans[0].planned_end
+    assert plans[1].planned_end > plans[1].planned_start
+
+
 def test_multiple_speakers_and_consecutive_segments_keep_order(tmp_path: Path) -> None:
     plans = plan_dialogue_timeline(_inputs(tmp_path, [
         (0, 0.7, 0.6, "SPEAKER_00"),
@@ -126,5 +141,5 @@ def test_final_timeline_has_no_overlap_and_keeps_pause_silent(tmp_path: Path) ->
     with wave.open(str(run.timeline_path), "rb") as wav:
         rate = wav.getframerate()
         samples = struct.unpack("<" + "h" * wav.getnframes(), wav.readframes(wav.getnframes()))
-    assert not any(samples[round(0.8 * rate):round(1.2 * rate)])
-    assert not any(samples[round(2.0 * rate):round(2.4 * rate)])
+    assert not any(samples[round(1.0 * rate):round(1.2 * rate)])
+    assert not any(samples[round(2.2 * rate):round(2.4 * rate)])

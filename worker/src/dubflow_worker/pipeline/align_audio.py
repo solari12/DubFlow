@@ -109,6 +109,8 @@ def _failed_segment(segment: Mapping[str, Any], exc: Exception) -> AlignedSegmen
         output_audio_path=None,
         status="failed",
         error=f"{type(exc).__name__}: {exc}",
+        source_text=str(segment.get("source_text", "")),
+        translated_text=str(segment.get("target_text", "")),
     )
 
 
@@ -149,7 +151,7 @@ def _align_segment(
     requires_rephrase = overflow_before and factor < settings.min_stretch_factor
     forcibly_truncated = False
     truncated_duration = 0.0
-    overflow_after = False
+    overflow_after = plan.overflow_after_fitting
 
     if math.isclose(original_duration, target_duration, rel_tol=0.0, abs_tol=0.5 / settings.sample_rate):
         normalized_path = _convert_source(
@@ -196,7 +198,7 @@ def _align_segment(
         status = "success"
         stretch_factor = factor
         error = None
-    elif settings.overflow_policy == "fail":
+    elif settings.overflow_policy in {"fail", "trim"}:
         return AlignedSegment(
             segment_id=segment_id,
             speaker=segment.get("speaker"),
@@ -211,8 +213,9 @@ def _align_segment(
             output_audio_path=None,
             status="overflow",
             error=(
-                f"Required stretch ratio {factor:.6f} is below the safe minimum "
-                f"{settings.min_stretch_factor:.3f}"
+                "QUALITY_FAIL reason=INSUFFICIENT_SPEECH_WINDOW; required stretch ratio "
+                f"{factor:.6f} is below the safe minimum {settings.min_stretch_factor:.3f}; "
+                "refusing to truncate spoken audio"
             ),
             source_start=source_start,
             source_end=source_end,
@@ -226,6 +229,8 @@ def _align_segment(
             shortened=shortened,
             preserved_pause_before=plan.preserved_pause_before,
             preserved_pause_after=plan.preserved_pause_after,
+            source_text=str(segment.get("source_text", "")),
+            translated_text=str(segment.get("target_text", "")),
         )
     else:
         normalized_path = _convert_source(
@@ -233,27 +238,14 @@ def _align_segment(
             temporary_wav,
             source_metadata=metadata,
             settings=settings,
-            atempo=1.0 / settings.min_stretch_factor
-            if settings.overflow_policy == "trim"
-            else None,
+            atempo=1.0 / settings.min_stretch_factor,
         )
         audio = read_pcm_wav(normalized_path)
-        if settings.overflow_policy == "preserve":
-            samples = array.array("h", audio.samples)
-            action = "overflow_preserve"
-            error = None
-        else:
-            samples = fit_samples_to_frames(audio.samples, target_frames, settings.channels)
-            forcibly_truncated = len(audio.samples) > target_frames * settings.channels
-            truncated_duration = round(max(0.0, audio.duration - target_duration), 6)
-            overflow_after = forcibly_truncated
-            action = "overflow_truncate_after_bounded_stretch"
-            error = (
-                "TTS remained longer than its source window after bounded time-stretch; "
-                f"the final {truncated_duration:.3f} seconds were explicitly truncated"
-            )
+        samples = array.array("h", audio.samples)
+        action = "overflow_preserve_after_bounded_stretch"
+        error = None
         status = "overflow"
-        stretch_factor = settings.min_stretch_factor if settings.overflow_policy == "trim" else 1.0
+        stretch_factor = settings.min_stretch_factor
 
     write_pcm_wav(output_path, samples, settings.sample_rate, settings.channels)
     final_audio = read_pcm_wav(output_path)
@@ -286,6 +278,8 @@ def _align_segment(
         truncated_duration=truncated_duration,
         preserved_pause_before=plan.preserved_pause_before,
         preserved_pause_after=plan.preserved_pause_after,
+        source_text=str(segment.get("source_text", "")),
+        translated_text=str(segment.get("target_text", "")),
     )
 
 

@@ -13,7 +13,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dev = ["pytest>=8,<9"]
+dev = ["pytest>=8,<9", "httpx2>=2,<3"]
 cuda = ["nvidia-cublas-cu12==12.6.4.1"]
 diarization = [
     "pyannote.audio==4.0.7",
@@ -24,6 +24,7 @@ diarization = [
 translation = ["argostranslate==1.11.0"]
 nllb = ["transformers>=4.45,<5", "sentencepiece>=0.2,<1", "torch>=2.0"]
 tts = ["sherpa-onnx==1.13.8"]
+dev-api = ["fastapi>=0.115,<1", "uvicorn[standard]>=0.30,<1", "python-multipart>=0.0.9,<1"]
 
 [[tool.uv.index]]
 name = "pytorch-cu130"

@@ -32,7 +32,7 @@ class TranslationUnit:
 
 
 def infer_segment_language(text: str, fallback: str) -> str:
-    """Conservatively distinguish Japanese script from predominantly Latin ASR text."""
+    """Infer the dominant Japanese, English, or Vietnamese script for one segment."""
     letters = [character for character in text if character.isalpha()]
     if not letters:
         return fallback
@@ -43,6 +43,10 @@ def infer_segment_language(text: str, fallback: str) -> str:
     latin = sum("LATIN" in unicodedata.name(char, "") for char in letters)
     if japanese and japanese / len(letters) >= 0.2:
         return "ja"
+    fallback_code = fallback.strip().lower().replace("_", "-").split("-", 1)[0]
+    vietnamese_specific = sum(char.lower() in "ăđơư" for char in letters)
+    if latin and (fallback_code == "vi" or vietnamese_specific):
+        return "vi"
     if latin / len(letters) >= 0.65:
         return "en"
     return fallback

@@ -1,38 +1,16 @@
 from __future__ import annotations
 
 import gc
-import os
+import logging
 from pathlib import Path
-import sys
 
 from dubflow_worker.asr.base import ASRError, ASREngine
 from dubflow_worker.config.settings import Settings
 from dubflow_worker.models.transcript import Transcript, TranscriptSegment, WordTimestamp
+from dubflow_worker.runtime.cuda import configure_cuda_dll_search
 
 
-# Keep the handles alive for the process lifetime. Windows removes a DLL search
-# directory when its os.add_dll_directory handle is closed.
-_cuda_dll_directory_handles = []
-
-
-def _configure_cuda_dll_search() -> None:
-    """Expose the optional, environment-local cuBLAS package to Windows DLL loading."""
-    if sys.platform != "win32":
-        return
-    try:
-        import nvidia.cublas
-    except ImportError:
-        return
-
-    package_paths = getattr(nvidia.cublas, "__path__", ())
-    for package_path in package_paths:
-        dll_dir = Path(package_path) / "bin"
-        if dll_dir.is_dir():
-            dll_dir_text = str(dll_dir)
-            current_paths = os.environ.get("PATH", "").split(os.pathsep)
-            if dll_dir_text.casefold() not in {path.casefold() for path in current_paths}:
-                os.environ["PATH"] = dll_dir_text + os.pathsep + os.environ.get("PATH", "")
-            _cuda_dll_directory_handles.append(os.add_dll_directory(str(dll_dir)))
+logger = logging.getLogger(__name__)
 
 
 class FasterWhisperASR(ASREngine):
@@ -46,7 +24,7 @@ class FasterWhisperASR(ASREngine):
         if self.settings.asr_device != "cuda":
             return
         try:
-            _configure_cuda_dll_search()
+            configure_cuda_dll_search()
             import ctranslate2
 
             count = ctranslate2.get_cuda_device_count()
@@ -61,6 +39,12 @@ class FasterWhisperASR(ASREngine):
                 "CUDA was requested, but CTranslate2 reports no CUDA devices. "
                 "Use --device cpu to select CPU execution explicitly."
             )
+        logger.info(
+            "CTranslate2 detected %s CUDA device(s); ASR configured with device=%s compute_type=%s",
+            count,
+            self.settings.asr_device,
+            self.settings.asr_compute_type,
+        )
 
     def _cuda_runtime_error(self, exc: Exception) -> ASRError | None:
         message = str(exc)
@@ -70,9 +54,9 @@ class FasterWhisperASR(ASREngine):
         ):
             return ASRError(
                 "CUDA was requested and an NVIDIA GPU is visible, but CTranslate2 could not "
-                f"load a required CUDA runtime library ({message}). Install the CUDA/cuDNN "
-                "runtime for this worker with `uv sync --project worker --extra cuda`, or "
-                "select --device cpu --compute-type int8."
+                f"load a required CUDA runtime library ({message}). Install "
+                "`nvidia-cublas-cu12==12.6.4.1` into the Python environment running this worker "
+                "and keep the CUDA/cuDNN runtime available."
             )
         return None
 
@@ -92,6 +76,12 @@ class FasterWhisperASR(ASREngine):
                 self.settings.asr_model,
                 device=self.settings.asr_device,
                 compute_type=self.settings.asr_compute_type,
+            )
+            logger.info(
+                "Loaded faster-whisper model=%s device=%s compute_type=%s",
+                self.settings.asr_model,
+                self.settings.asr_device,
+                self.settings.asr_compute_type,
             )
             return self._model
         except Exception as exc:

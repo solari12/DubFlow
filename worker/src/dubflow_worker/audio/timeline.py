@@ -65,7 +65,6 @@ def plan_dialogue_timeline(
         raise ValueError("sample_rate must be positive")
     plans: list[TimelineSegmentPlan] = []
     previous_planned_end = 0.0
-    timeline_shift = 0.0
     for index, item in enumerate(segments):
         segment_id = int(item["segment_id"])
         source_start = float(item["source_start"])
@@ -85,35 +84,41 @@ def plan_dialogue_timeline(
             max(0.0, source_end - source_start - 1.0 / sample_rate),
         )
         planned_start = round(
-            max(source_start + timeline_shift + source_pause_before, previous_planned_end)
+            max(source_start + source_pause_before, previous_planned_end)
             * sample_rate
         ) / sample_rate
-        window_end = source_end + timeline_shift
+        window_end = source_end
         if index + 1 < len(segments):
             next_item = segments[index + 1]
             next_start = (
                 float(next_item["source_start"])
-                + timeline_shift
                 + max(0.0, float(next_item.get("source_pause_before", 0.0)))
             )
             window_end = min(window_end, next_start)
         window_end = max(planned_start, round(window_end * sample_rate) / sample_rate)
         allowed_duration = round(max(0.0, window_end - planned_start) * sample_rate) / sample_rate
         if allowed_duration < 1.0 / sample_rate:
-            raise ValueError(f"No available source window for segment {segment_id}")
+            # Earlier dialogue may have consumed this source window. Keep the
+            # segment in the ordered plan with a one-frame nominal window so
+            # alignment can either preserve/spill its audio or report an
+            # explicit QUALITY_FAIL under a fail policy.
+            allowed_duration = 1.0 / sample_rate
 
         stretch_ratio = allowed_duration / duration
         tolerance = 0.5 / sample_rate
         overflow_before = duration > allowed_duration + tolerance
         overflow_after = overflow_before and stretch_ratio < min_stretch_ratio
         if preserve_overflow and overflow_before:
-            planned_end = planned_start + duration
+            # Severe overruns still receive the configured bounded speed-up;
+            # reserve the resulting duration while keeping the complete audio.
+            # atempo output can exceed its nominal ratio by a few milliseconds;
+            # leave a small guard gap so the subsequent clips cannot overlap.
+            planned_end = planned_start + duration * min_stretch_ratio + 0.02
         else:
             planned_end = planned_start + allowed_duration
         pause_before = max(0.0, planned_start - previous_planned_end)
         next_start = (
             float(segments[index + 1]["source_start"])
-            + timeline_shift
             + max(0.0, float(segments[index + 1].get("source_pause_before", 0.0)))
             if index + 1 < len(segments)
             else planned_end
@@ -141,7 +146,6 @@ def plan_dialogue_timeline(
             )
         )
         previous_planned_end = planned_end
-        timeline_shift = max(timeline_shift, planned_end - source_end)
     return plans
 
 

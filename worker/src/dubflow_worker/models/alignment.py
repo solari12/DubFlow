@@ -14,7 +14,7 @@ class AudioAlignmentSettings:
     min_stretch_factor: float = 0.85
     max_stretch_factor: float = 1.10
     pad_short_audio: bool = True
-    overflow_policy: OverflowPolicy = "trim"
+    overflow_policy: OverflowPolicy = "preserve"
     sample_rate: int = 16000
     channels: int = 1
     output_format: str = "wav"
@@ -64,16 +64,25 @@ class AlignedSegment:
     shortened: bool = False
     forcibly_truncated: bool = False
     truncated_duration: float = 0.0
+    source_text: str = ""
+    translated_text: str = ""
     preserved_pause_before: float = 0.0
     preserved_pause_after: float = 0.0
 
     def to_dict(self) -> dict:
+        quality_fail = (
+            self.status == "failed"
+            or (self.status == "overflow" and self.output_audio_path is None)
+            or self.forcibly_truncated
+        )
         return {
             "segment_id": self.segment_id,
             "speaker": self.speaker,
             "target_start": self.target_start,
             "target_end": self.target_end,
             "target_duration": self.target_duration,
+            "tts_duration": self.original_tts_duration,
+            "final_duration": self.final_audio_duration,
             "original_tts_duration": self.original_tts_duration,
             "final_audio_duration": self.final_audio_duration,
             "duration_error": self.duration_error,
@@ -94,6 +103,13 @@ class AlignedSegment:
             "shortened": self.shortened,
             "forcibly_truncated": self.forcibly_truncated,
             "truncated_duration": self.truncated_duration,
+            "was_stretched": self.stretch_factor is not None and self.stretch_factor < 1.0,
+            "was_truncated": self.forcibly_truncated,
+            "truncated_seconds": self.truncated_duration,
+            "quality_status": "QUALITY_FAIL" if quality_fail else "OK",
+            "quality_failure_reason": "INSUFFICIENT_SPEECH_WINDOW" if quality_fail else None,
+            "source_text": self.source_text,
+            "translated_text": self.translated_text,
             "preserved_pause_before": self.preserved_pause_before,
             "preserved_pause_after": self.preserved_pause_after,
         }
@@ -127,6 +143,15 @@ class AlignmentRun:
     def overflow_count(self) -> int:
         return sum(segment.status == "overflow" for segment in self.segments)
 
+    @property
+    def quality_fail_count(self) -> int:
+        return sum(
+            segment.status == "failed"
+            or (segment.status == "overflow" and segment.output_audio_path is None)
+            or segment.forcibly_truncated
+            for segment in self.segments
+        )
+
     def to_dict(self, *, input_transcript: dict | None = None) -> dict:
         return {
             "version": "1.0",
@@ -142,6 +167,7 @@ class AlignmentRun:
             "successful_count": self.successful_count,
             "failed_count": self.failed_count,
             "overflow_count": self.overflow_count,
+            "quality_fail_count": self.quality_fail_count,
             "total_processing_time_seconds": self.runtime_seconds,
             "rtf": self.rtf,
             "peak_amplitude": self.peak_amplitude,

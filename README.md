@@ -2,7 +2,7 @@
 
 AI-Powered Multilingual Video Dubbing Platform
 
-DubFlow is a planned web platform for translating and dubbing video and audio with AI. Its intended workflow combines transcription, speaker-aware translation and voice generation, timing and alignment, and final media rendering. Phase 1A has started: a local Python ASR worker prototype now covers media audio extraction and timestamped transcription. The wider platform remains in planning.
+DubFlow is a web prototype for translating and dubbing video and audio with AI. Its local Python worker contains modular ASR, diarization, translation, TTS, alignment, and rendering stages. Phase 2A adds a development-only browser/API path that sequences those existing modules; it remains a local prototype.
 
 ## Project Vision
 
@@ -253,6 +253,12 @@ PHASE 8  Batch jobs / scalability
    ↓
 PHASE 9  Docker / Deployment / Production hardening
 ```
+
+## Phase 2A — Local browser prototype
+
+The React/Vite frontend and FastAPI dev API exercise the existing worker stages from a browser. The API keeps job state in memory and writes uploads and generated artifacts below `worker/output/dev-api/`.
+
+The Dev API uses KorvaTTS for Vietnamese speech in the isolated `worker/.venv-tts-korva` environment. Voice, device, and denoising steps can be set with `DUBFLOW_TTS_VOICE`, `DUBFLOW_TTS_DEVICE`, and `DUBFLOW_TTS_STEPS`. Translation defaults to NLLB (`DUBFLOW_TRANSLATION_PROVIDER=nllb`); diarization defaults to the pyannote Community-1 model on CPU. Those optional model dependencies and model access must be installed/configured in the worker environment. See [worker README](worker/README.md) for exact local commands and environment notes.
 
 ## Immediate Next Step
 

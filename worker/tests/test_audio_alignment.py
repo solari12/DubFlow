@@ -60,7 +60,7 @@ def test_quality_alignment_defaults_to_conservative_stretch_limits() -> None:
     settings = AudioAlignmentSettings()
     assert settings.min_stretch_factor == 0.85
     assert settings.max_stretch_factor == 1.10
-    assert settings.overflow_policy == "trim"
+    assert settings.overflow_policy == "preserve"
 
 
 def test_exact_duration_match(tmp_path: Path) -> None:
@@ -116,12 +116,12 @@ def test_explicit_preserve_policy_remains_available_for_single_clip(tmp_path: Pa
     segment = run.segments[0]
 
     assert segment.status == "overflow"
-    assert segment.alignment_action == "overflow_preserve"
-    assert _duration(segment.output_audio_path) == 0.8
-    assert run.total_duration == 0.8
+    assert segment.alignment_action == "overflow_preserve_after_bounded_stretch"
+    assert math.isclose(_duration(segment.output_audio_path), 0.68, abs_tol=0.002)
+    assert math.isclose(run.total_duration, 0.68, abs_tol=0.002)
 
 
-def test_overflow_policy_can_explicitly_trim(tmp_path: Path) -> None:
+def test_legacy_trim_policy_fails_without_truncating(tmp_path: Path) -> None:
     wav = tmp_path / "tts" / "segment-0000.wav"
     _write_wav(wav, 0.8)
 
@@ -132,9 +132,9 @@ def test_overflow_policy_can_explicitly_trim(tmp_path: Path) -> None:
     )
 
     assert run.segments[0].status == "overflow"
-    assert run.segments[0].alignment_action == "overflow_truncate_after_bounded_stretch"
-    assert "truncated" in run.segments[0].error.lower()
-    assert _duration(run.segments[0].output_audio_path) == 0.5
+    assert run.segments[0].output_audio_path is None
+    assert "QUALITY_FAIL" in run.segments[0].error
+    assert run.segments[0].forcibly_truncated is False
 
 
 def test_missing_tts_file_fails_segment_and_continues(tmp_path: Path) -> None:
@@ -243,7 +243,7 @@ def test_overlapping_segments_are_summed_and_peak_normalized(tmp_path: Path) -> 
     assert max(abs(value) for value in values) < 32767
 
 
-def test_default_severe_overflow_is_bounded_and_reported_as_truncated(tmp_path: Path) -> None:
+def test_default_severe_overflow_preserves_full_audio_and_reports_quality_fields(tmp_path: Path) -> None:
     wav = tmp_path / "tts" / "segment-0000.wav"
     _write_wav(wav, 0.8)
 
@@ -251,13 +251,20 @@ def test_default_severe_overflow_is_bounded_and_reported_as_truncated(tmp_path: 
     segment = run.segments[0]
 
     assert segment.status == "overflow"
+    assert segment.alignment_action == "overflow_preserve_after_bounded_stretch"
     assert segment.requires_concise_rephrasing is True
     assert segment.overflow_before_fitting is True
     assert segment.overflow_after_fitting is True
-    assert segment.forcibly_truncated is True
-    assert segment.truncated_duration > 0
-    assert _duration(segment.output_audio_path) == 0.5
-    assert run.total_duration == 0.5
+    assert segment.forcibly_truncated is False
+    assert segment.truncated_duration == 0
+    assert math.isclose(_duration(segment.output_audio_path), 0.68, abs_tol=0.002)
+    assert math.isclose(run.total_duration, 0.68, abs_tol=0.002)
+    report = segment.to_dict()
+    assert report["was_truncated"] is False
+    assert report["truncated_seconds"] == 0
+    assert report["was_stretched"] is True
+    assert report["tts_duration"] == 0.8
+    assert math.isclose(report["final_duration"], 0.68, abs_tol=0.002)
 
 
 def test_empty_transcript_creates_empty_timeline(tmp_path: Path) -> None:

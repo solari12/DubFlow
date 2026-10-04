@@ -1,4 +1,6 @@
 # Local Python tooling and downloaded ASR weights
+frontend/node_modules/
+frontend/dist/
 worker/.venv/
 worker/.venv-tts/
 worker/.python/

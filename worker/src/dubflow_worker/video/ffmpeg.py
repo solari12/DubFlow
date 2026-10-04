@@ -174,11 +174,26 @@ class FFmpegVideoRenderer:
         if result.returncode:
             raise VideoRenderError(f"Rendered MP4 failed stream decode: {result.stderr[-1600:]}")
 
-    def _command(self, ffmpeg: str, video: Path, audio: Path, output: Path, duration: float) -> list[str]:
-        if self.settings.video_mode == "copy":
+    def _command(
+        self,
+        ffmpeg: str,
+        video: Path,
+        audio: Path,
+        output: Path,
+        duration: float,
+        *,
+        extend_video: bool = False,
+        extension_duration: float = 0.0,
+    ) -> list[str]:
+        if self.settings.video_mode == "copy" and not extend_video:
             video_options = ["-c:v", "copy"]
         else:
             video_options = ["-c:v", "libx264", "-preset", "veryfast", "-crf", "23"]
+        video_filter = (
+            ["-vf", f"tpad=stop_mode=clone:stop_duration={extension_duration:.9f}"]
+            if extend_video
+            else []
+        )
         return [
             ffmpeg,
             "-hide_banner",
@@ -192,6 +207,7 @@ class FFmpegVideoRenderer:
             "0:v:0",
             "-map",
             "1:a:0",
+            *video_filter,
             *video_options,
             "-c:a",
             self.settings.audio_codec,
@@ -226,7 +242,7 @@ class FFmpegVideoRenderer:
             video_stream_copied=self.settings.video_mode == "copy",
             audio_reencoded=True,
             duration_mismatch=None,
-            duration_policy="preserve_video_duration; trim_long_audio; pad_short_audio_with_silence",
+            duration_policy="preserve_speech_audio; extend_video_with_final_frame_when_needed",
             runtime_seconds=0,
             status="failed",
         )
@@ -252,15 +268,33 @@ class FFmpegVideoRenderer:
                     result.source_audio_duration = source_audio.duration
             result.duration_mismatch = round(audio_duration - source_info.duration, 6)
             if audio_duration > source_info.duration + 0.001:
-                result.duration_policy = "trim_audio_to_video_duration"
+                extension_duration = audio_duration - source_info.duration
+                output_duration = audio_duration
+                extend_video = True
+                result.duration_policy = "extend_video_with_frozen_last_frame_to_preserve_audio"
+                result.video_stream_copied = False
             elif audio_duration < source_info.duration - 0.001:
+                extension_duration = 0.0
+                output_duration = source_info.duration
+                extend_video = False
                 result.duration_policy = "pad_audio_with_trailing_silence_to_video_duration"
             else:
+                extension_duration = 0.0
+                output_duration = source_info.duration
+                extend_video = False
                 result.duration_policy = "audio_matches_video_duration"
 
             output_path.parent.mkdir(parents=True, exist_ok=True)
             temporary_output.unlink(missing_ok=True)
-            command = self._command(ffmpeg, video_path.resolve(), dubbed_audio_path.resolve(), temporary_output, source_info.duration)
+            command = self._command(
+                ffmpeg,
+                video_path.resolve(),
+                dubbed_audio_path.resolve(),
+                temporary_output,
+                output_duration,
+                extend_video=extend_video,
+                extension_duration=extension_duration,
+            )
             completed = subprocess.run(command, capture_output=True, text=True, check=False)
             if completed.returncode:
                 raise VideoRenderError(

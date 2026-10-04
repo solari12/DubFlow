@@ -2,6 +2,46 @@
 
 Phase 1A is a local prototype for media-to-transcript processing. It extracts a mono 16 kHz WAV with FFmpeg, transcribes it through a replaceable ASR interface, and writes stable JSON. It does not include an API server, queue, database, or TTS.
 
+## Phase 2A local development API
+
+The optional FastAPI server sequences the existing ASR, diarization, translation, TTS, alignment, and rendering modules in a local in-process background task. It is a development prototype: jobs are held in memory, only one API process is expected, and uploaded media/output files are stored under `worker/output/dev-api/`.
+
+Install the worker and API/model extras from the repository root:
+
+```powershell
+uv sync --project worker --extra dev --extra cuda --extra diarization --extra nllb --extra tts --extra dev-api
+```
+
+Set a Hugging Face token with access to `pyannote/speaker-diarization-community-1` if required by your account. The Dev API uses KorvaTTS for speech synthesis in the separate `.venv-tts-korva` environment; CUDA sessions are required when `DUBFLOW_TTS_DEVICE=gpu`. Set `DUBFLOW_TTS_VOICE` (default `gia_bao`), `DUBFLOW_TTS_DEVICE` (default `gpu`), and `DUBFLOW_TTS_STEPS` (default `32`) to configure synthesis. `DUBFLOW_TTS_PYTHON` can point to the Korva environment's Python executable. Piper benchmark scripts and history remain available but are not called by the Dev API. NLLB runs on CPU by default; set `DUBFLOW_TRANSLATION_PROVIDER=argos` to explicitly use Argos instead. ASR defaults to CUDA per worker settings; for CPU-only operation set `DUBFLOW_ASR_DEVICE=cpu` and `DUBFLOW_ASR_COMPUTE_TYPE=int8`.
+
+For this checkout, the existing `.venv-diarization` environment contains ASR, diarization, translation, and the installed FastAPI server dependencies. Install cuBLAS into the same Python environment used by the API (the standard `uv sync` target is `worker/.venv`):
+
+```powershell
+python -m uv pip install --python worker\.venv-diarization\Scripts\python.exe "nvidia-cublas-cu12==12.6.4.1"
+```
+
+DubFlow discovers CUDA DLL folders from the active environment's NVIDIA wheels, CTranslate2 package, and PyTorch package at Python startup. The ASR engine repeats this setup before importing CTranslate2, including when launched through the Dev API's `--app-dir` path. No machine-wide CUDA path is required. The API calls `scripts/synthesize_korva.py` with `.venv-tts-korva` so Korva's ONNX Runtime and CUDA packages stay isolated. Start the API from the repository root with CUDA ASR, CUDA diarization, and GPU KorvaTTS:
+
+```powershell
+$env:DUBFLOW_ASR_DEVICE = "cuda"
+$env:DUBFLOW_ASR_COMPUTE_TYPE = "float16"
+$env:DUBFLOW_DIARIZATION_DEVICE = "cuda"
+$env:DUBFLOW_TTS_DEVICE = "gpu"
+worker\.venv-diarization\Scripts\python.exe -m uvicorn dubflow_worker.dev_api.main:app --app-dir worker/src --reload --port 8000
+```
+
+Set `HF_HUB_OFFLINE=1` only when the ASR, diarization, and NLLB models are already cached. The API logs the detected CTranslate2 CUDA device count and the loaded Whisper model's device and compute type.
+
+In another terminal, start the frontend:
+
+```powershell
+cd D:\Project\DubFlow\frontend
+npm install
+npm run dev
+```
+
+Open <http://localhost:5173>. The API allows CORS only from `http://localhost:5173`.
+
 ## Requirements
 
 - Python 3.11 (the project intentionally rejects Python 3.12+ for this phase)
@@ -43,6 +83,10 @@ CLI options override these environment variables:
 | `DUBFLOW_ASR_DEVICE` | `cuda` | `cuda` or `cpu` |
 | `DUBFLOW_ASR_COMPUTE_TYPE` | device-dependent | `float16` for CUDA; `int8` for CPU |
 | `DUBFLOW_FFMPEG` | `ffmpeg` | FFmpeg executable or path; the packaged binary is used if PATH lookup fails |
+| `DUBFLOW_TTS_VOICE` | `gia_bao` | KorvaTTS voice style |
+| `DUBFLOW_TTS_DEVICE` | `gpu` | KorvaTTS device: `gpu`, `cpu`, or `auto` |
+| `DUBFLOW_TTS_STEPS` | `32` | KorvaTTS denoising steps, from 1 to 32 |
+| `DUBFLOW_TTS_PYTHON` | `worker/.venv-tts-korva/Scripts/python.exe` | Python executable for the isolated KorvaTTS adapter |
 
 The model cache follows Hugging Face's cache configuration, including `HF_HOME`. Model download size is not a measurement of peak VRAM use.
 
